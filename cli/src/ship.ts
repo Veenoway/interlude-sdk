@@ -54,7 +54,7 @@ export async function ship(argv: string[]): Promise<void> {
     ["node", session.url],
   ]);
   say("");
-  note("point the SDK at that node. no faucet, no key, no hub to copy.");
+  note("point the SDK at that node. the first one takes a few minutes; a 502 right after this is the image building.");
 }
 
 async function publish(

@@ -12,9 +12,10 @@ slash unwinds a lie. Privacy is not in this product.
 From your Foundry project, not a fork of this repo:
 
 ```sh
-npm i @interludelayer-sdk/sdk @interludelayer-sdk/cli
-npx interlude init
-npx interlude gen --contract YourApp
+npm i @interludelayer-sdk/sdk
+npm i -D @interludelayer-sdk/cli
+npx @interludelayer-sdk/cli init
+npx @interludelayer-sdk/cli gen --contract YourApp
 ```
 
 `init` vendors `Delegatable` into `lib/interlude` and writes the remapping.
@@ -26,16 +27,27 @@ annotated state. Same-directory Solidity is not auto-imported.
 Then:
 
 ```sh
-npx interlude ship
+npx @interludelayer-sdk/cli ship
 ```
 
-`ship` sends us the bytecode. We deploy it on Monad testnet, we pay the gas,
-we call `delegateAll()`, we spawn a node, we print the URL. No faucet, no
-wallet key, no invite, no issue to open. The CLI already knows where we are.
+`ship` talks to `https://control.interludelayer.xyz`. We deploy the bytecode
+on Monad testnet, we pay the gas, we call `delegateAll()`, we start a node,
+we print the URL. No faucet, no wallet key, no invite, no issue to open.
 
-Point the SDK at that URL:
+The first node takes a few minutes to come up. A 502 right after the command
+is the image building. Do not point the SDK at
+`https://rpc.interludelayer.xyz` — that node only serves Room.
+
+Point the SDK at the URL `ship` printed:
 
 ```ts
+const interlude = createInterludeClient({
+  app,   // printed
+  abi,
+  node,  // printed
+  base,
+});
+
 const session = await interlude.openSession({ wallet, scope: ["play"] });
 await session.send("play");
 ```

@@ -6,7 +6,7 @@ import { fail, note, ok, pairs, say, step } from "./ui.js";
 /**
  * Ask the operator control plane for a node URL.
  *
- * The partner never talks to Fly. They deploy against the public hub, call delegateAll,
+ * The partner never talks to Railway. They deploy against the public hub, call delegateAll,
  * then this — or they wait: the control plane watches DelegationOpened and spawns on its own.
  */
 export async function sessions(argv: string[]): Promise<void> {
@@ -51,7 +51,7 @@ export async function sessions(argv: string[]): Promise<void> {
   pairs([
     ["app", app],
     ["node", body.url],
-    ...(body.name ? ([["fly", body.name]] as [string, string][]) : []),
+    ...(body.name ? ([["name", body.name]] as [string, string][]) : []),
     ...(body.status ? ([["status", body.status]] as [string, string][]) : []),
   ]);
   if (command === "create") {

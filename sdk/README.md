@@ -7,58 +7,67 @@ gas, and comes back in a single round trip with its return value already decoded
 
 ## The shortest thing that works
 
+That snippet talks to the **public Room**. `https://rpc.interludelayer.xyz` serves
+that contract and no other. After `npx @interludelayer-sdk/cli ship`, pass the
+printed `app` and `node` into `createInterludeClient`. A 502 on that URL for a
+few minutes is the node image building.
+
 ```tsx
 import { createPublicClient, http, type WalletClient } from "viem";
 import { monadTestnet } from "viem/chains";
 import { createInterludeClient } from "@interludelayer-sdk/sdk";
 import { createInterludeHooks } from "@interludelayer-sdk/sdk/react";
-import { playersAbi } from "./players-abi";
+import { roomAbi } from "./room-abi";
 
 const { InterludeProvider, useSession, useSessionCall } = createInterludeHooks(
   createInterludeClient({
-    app: "0x7584eeEe58787a3C88411905efD4d379B274fF7d",
-    abi: playersAbi,
+    app: "0x28C583542854f2E0b32930E5252687F6fA8D5d91",
+    abi: roomAbi,
     node: "https://rpc.interludelayer.xyz",
     base: createPublicClient({ chain: monadTestnet, transport: http() }),
   }),
 );
 
-function Board() {
+function Floor() {
   const { session, open } = useSession();
+  const join = useSessionCall("join");
   const move = useSessionCall("move");
 
-  if (!session) return <button onClick={() => open()}>Play</button>;
+  if (!session) return <button onClick={() => open()}>Enter</button>;
 
   return (
-    <button onClick={() => move.send([3n])}>
-      square {String(move.data ?? 0n)}
-      {move.latencyMs && ` · ${move.latencyMs.toFixed(1)}ms`}
-    </button>
+    <>
+      <button onClick={() => join.send()}>Join</button>
+      <button onClick={() => move.send([1])}>East</button>
+    </>
   );
 }
 
 export function Game({ wallet }: { wallet: WalletClient }) {
   return (
-    <InterludeProvider wallet={wallet} scope={["move"]}>
-      <Board />
+    <InterludeProvider wallet={wallet} scope={["join", "move"]}>
+      <Floor />
     </InterludeProvider>
   );
 }
 ```
 
-That is the whole integration. `open()` prompts the wallet once — the user signs a grant that
-says "this key may call `move`, for the next hour" — and `move.send([3n])` never prompts again.
-`move.data` is the `uint256` the app returned, typed off the ABI.
+That is the whole client. For a contract you shipped, replace `app` and `node`
+with what the CLI printed. `open()` prompts the wallet once — the user signs a grant that
+says "this key may call `join` and `move`, for the next hour" — and the buttons never prompt
+again.
 
-A process is the same three lines, with `memoryStore()` and a key it holds. `examples/agent-clock.mjs` does that against the public Clock.
+A process is the same three lines, with `memoryStore()` and a key it holds.
+`examples/agent-room.mjs` does that against the public Room.
 
 Without React the core is the same three lines:
 
 ```ts
-const interlude = createInterludeClient({ app, abi: playersAbi, node, base });
+const interlude = createInterludeClient({ app, abi: roomAbi, node, base });
 
-const session = await interlude.openSession({ wallet, scope: ["move"] });
-const { result, latencyMs } = await session.send("move", [3n]);
+const session = await interlude.openSession({ wallet, scope: ["join", "move"] });
+await session.send("join");
+const { latencyMs } = await session.send("move", [1]);
 ```
 
 ## Install

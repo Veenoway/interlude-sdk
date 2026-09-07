@@ -12,7 +12,9 @@ npx @interludelayer-sdk/cli ship
 ```
 
 `ship` talks to `https://control.interludelayer.xyz`. Nothing to set. The CLI prints
-a node URL. Point the SDK at it.
+an app address and a node URL. The first node takes a few minutes to come up; a
+502 right after the command is the image building. Point the SDK at that URL, not
+at `https://rpc.interludelayer.xyz` (Room only).
 
 The hub artifact and the Solidity a contract inherits (`Delegatable`, `Types`) are bundled.
 `init` copies those sources into `lib/interlude` when they sit outside the project: Foundry
@@ -121,9 +123,10 @@ That gets you:
   app         0xdc64a140…
 ```
 
-Those two URLs are loopback: they only answer on the laptop that ran `dev`. The public node
-is `https://rpc.interludelayer.xyz`, against Monad testnet. Clock on that node is at
-[demo.interludelayer.xyz/clock](https://demo.interludelayer.xyz/clock).
+Those two URLs are loopback: they only answer on the laptop that ran `dev`. The public
+Room node is `https://rpc.interludelayer.xyz`, against Monad testnet. The demo is at
+[demo.interludelayer.xyz/room](https://demo.interludelayer.xyz/room). Your app gets a
+different URL from `ship`.
 
 The line that matters is the one after, once a batch lands:
 

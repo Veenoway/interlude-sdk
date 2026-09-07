@@ -12,20 +12,21 @@ This repository is the public surface a team integrates against. The engine itse
 ## Install
 
 ```sh
-npm i @interludelayer-sdk/sdk @interludelayer-sdk/cli
+npm i @interludelayer-sdk/sdk
+npm i -D @interludelayer-sdk/cli
 ```
 
-Docs: [interludelayer.xyz/docs](https://interludelayer.xyz/docs)
+Docs: [interludelayer.xyz/docs](https://interludelayer.xyz/docs) · first hour: [interludelayer.xyz/docs/first-hour](https://interludelayer.xyz/docs/first-hour)
 
 ```sh
-npx interlude init
-npx interlude gen --contract YourApp
-npx interlude ship
+npx @interludelayer-sdk/cli init
+npx @interludelayer-sdk/cli gen --contract YourApp
+npx @interludelayer-sdk/cli ship
 ```
 
-`ship` sends the bytecode to Interlude. We deploy on Monad testnet, pay the gas, open the session, and print a node URL. Point the SDK at that URL. On-chain owner of a shipped app is Interlude; you keep the source, the frontend and the users.
+`ship` talks to `https://control.interludelayer.xyz`. We deploy on Monad testnet, pay the gas, open the session, and print a node URL. The first node takes a few minutes to come up; a 502 right after the command is the image building. Point the SDK at that URL. Do not use `https://rpc.interludelayer.xyz` — that node only serves [Room](https://demo.interludelayer.xyz/room).
 
-A contract that is already live cannot be adopted. Delegated storage is declared at construction.
+On-chain owner of a shipped app is Interlude; you keep the source, the frontend and the users. A contract that is already live cannot be adopted. Delegated storage is declared at construction.
 
 ## Layout
 

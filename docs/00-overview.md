@@ -116,10 +116,13 @@ You write the contract. We run the node.
 1. **Contract**: inherit `Delegatable` and register your delegated state in the
    constructor. Behind a proxy, do it in the initializer and call
    `_initDelegatable(owner)` there too.
-2. **Go live**: `interlude ship` sends us the bytecode. We deploy on Monad
-   testnet, we call `delegateAll`, we start a node, we print the URL. No
-   validator to pick, no stake, no window, no machine. You only call
-   `delegateAll` or `delegateKey` yourself for a second partition later.
+2. **Go live**: `npx @interludelayer-sdk/cli ship` talks to
+   `https://control.interludelayer.xyz`. We deploy on Monad testnet, we call
+   `delegateAll`, we start a node, we print the URL. The first node takes a
+   few minutes to come up. No validator to pick, no stake, no window, no
+   machine. You only call `delegateAll` or `delegateKey` yourself for a
+   second partition later. Do not point the SDK at
+   `https://rpc.interludelayer.xyz` — that node only serves Room.
 3. **Frontend**: point the client at the URL we print. Standard `eth_*`, so
    viem and wagmi work unchanged.
 
