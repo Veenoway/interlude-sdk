@@ -1,0 +1,75 @@
+{
+  "name": "@interludelayer-sdk/sdk",
+  "version": "0.1.1",
+  "description": "Open a session and send gasless, sub-millisecond transactions to an Interlude node.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Veenoway/interlude-sdk.git",
+    "directory": "sdk"
+  },
+  "homepage": "https://github.com/Veenoway/interlude-sdk#readme",
+  "bugs": "https://github.com/Veenoway/interlude-sdk/issues",
+  "keywords": [
+    "monad",
+    "ethereum",
+    "evm",
+    "rollup",
+    "ephemeral-rollup",
+    "session-keys",
+    "gasless",
+    "viem"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js",
+      "require": "./dist/react.cjs"
+    }
+  },
+  "scripts": {
+    "prepublishOnly": "pnpm build",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "../../scripts/sdk-e2e.sh",
+    "example:agent": "node examples/agent-clock.mjs"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "viem": "^2.21.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "jsdom": "^30.0.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tsup": "^8",
+    "typescript": "^5",
+    "viem": "^2.21.0",
+    "vitest": "^3"
+  }
+}

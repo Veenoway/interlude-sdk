@@ -1,0 +1,54 @@
+{
+  "name": "@interludelayer-sdk/cli",
+  "version": "0.1.2",
+  "description": "Stand up a local Interlude stack against your own Foundry project with one command.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Veenoway/interlude-sdk.git",
+    "directory": "cli"
+  },
+  "homepage": "https://github.com/Veenoway/interlude-sdk#readme",
+  "bugs": "https://github.com/Veenoway/interlude-sdk/issues",
+  "keywords": [
+    "monad",
+    "ethereum",
+    "evm",
+    "rollup",
+    "ephemeral-rollup",
+    "foundry",
+    "cli"
+  ],
+  "type": "module",
+  "bin": {
+    "interlude": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "artifacts",
+    "contracts",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "bundle": "node scripts/bundle-artifacts.mjs && node scripts/bundle-contracts.mjs",
+    "build": "tsup",
+    "prepublishOnly": "pnpm bundle && pnpm build",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "smol-toml": "^1.3.1",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsup": "^8",
+    "tsx": "^4",
+    "typescript": "^5",
+    "vitest": "^3"
+  }
+}

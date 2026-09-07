@@ -1,0 +1,93 @@
+/**
+ * A headless agent on the public Clock.
+ *
+ * No browser, no React, no faucet. The agent is the granter: it signs one
+ * EIP-712 grant, opens a board, then presses. Watch the explorer for the
+ * presses, then the settle on Monad.
+ *
+ *   pnpm --filter @interludelayer-sdk/sdk exec node examples/agent-clock.mjs
+ *
+ * Optional: INTERLUDE_NODE, INTERLUDE_CLOCK, INTERLUDE_BASE_RPC, AGENT_PRESSES.
+ */
+import { createPublicClient, createWalletClient, http } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { createInterludeClient, memoryStore } from "../dist/index.js";
+
+const NODE = process.env.INTERLUDE_NODE ?? "https://rpc.interludelayer.xyz";
+const APP = process.env.INTERLUDE_CLOCK ?? "0x7584eeEe58787a3C88411905efD4d379B274fF7d";
+const BASE_RPC = process.env.INTERLUDE_BASE_RPC ?? "https://testnet-rpc.monad.xyz";
+const PRESSES = Number(process.env.AGENT_PRESSES ?? 12);
+const BUDGET_MS = 60_000;
+const EXPLORER = "https://demo.interludelayer.xyz/explorer";
+
+const board = {
+  name: "b",
+  type: "tuple",
+  components: [
+    { name: "player", type: "address" },
+    { name: "whiteMs", type: "uint32" },
+    { name: "blackMs", type: "uint32" },
+    { name: "pressedAt", type: "uint40" },
+    { name: "presses", type: "uint32" },
+    { name: "turn", type: "uint8" },
+    { name: "status", type: "uint8" },
+  ],
+};
+
+const abi = [
+  {
+    type: "function",
+    name: "open",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "budgetMs", type: "uint32" }],
+    outputs: [{ name: "id", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "press",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "id", type: "uint256" }],
+    outputs: [board],
+  },
+];
+
+const account = privateKeyToAccount(generatePrivateKey());
+const base = createPublicClient({ transport: http(BASE_RPC) });
+const wallet = createWalletClient({ account, transport: http(BASE_RPC) });
+
+const interlude = createInterludeClient({
+  app: APP,
+  abi,
+  node: NODE,
+  base,
+  store: memoryStore(),
+});
+
+const session = await interlude.openSession({
+  wallet,
+  scope: ["open", "press"],
+});
+
+console.log("agent   ", session.granter);
+console.log("app     ", APP);
+console.log("node    ", NODE);
+console.log("grant   signed once. every press after this is the session key.");
+
+const opened = await session.send("open", [BUDGET_MS]);
+const boardId = opened.result;
+console.log("board   ", boardId.toString());
+console.log("open    ", opened.latencyMs.toFixed(1), "ms");
+console.log("watch   ", EXPLORER);
+
+const latencies = [];
+for (let i = 0; i < PRESSES; i++) {
+  const { result, latencyMs } = await session.send("press", [boardId]);
+  latencies.push(latencyMs);
+  console.log(
+    `press ${String(i + 1).padStart(2, "0")}  ${latencyMs.toFixed(1)} ms   turn=${result.turn}  n=${result.presses}`,
+  );
+}
+
+const mean = latencies.reduce((s, n) => s + n, 0) / latencies.length;
+console.log("mean    ", mean.toFixed(1), "ms over", latencies.length, "presses");
+console.log("settle  the next commit on the node lands this on Monad. same address.");
