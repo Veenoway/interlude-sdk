@@ -1,6 +1,6 @@
 {
   "name": "@interludelayer-sdk/cli",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Stand up a local Interlude stack against your own Foundry project with one command.",
   "license": "MIT",
   "repository": {
