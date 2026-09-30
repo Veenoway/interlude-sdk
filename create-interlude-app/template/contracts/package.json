@@ -1,0 +1,22 @@
+{
+  "name": "__APP_NAME__-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Clicker: a Delegatable contract served by an Interlude node and settled on Monad.",
+  "engines": {
+    "node": ">=20.9"
+  },
+  "scripts": {
+    "build": "interlude check",
+    "test": "interlude check && forge test",
+    "gen": "interlude gen --contract Clicker",
+    "check": "interlude check",
+    "abi": "interlude abi --contract Clicker --out ../web/lib/abi.ts",
+    "ship": "interlude ship --contract Clicker",
+    "status": "interlude status",
+    "dev": "interlude dev"
+  },
+  "devDependencies": {
+    "@interludelayer-sdk/cli": "^0.2.1"
+  }
+}

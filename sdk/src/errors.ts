@@ -25,9 +25,201 @@ export class NodeUnreachableError extends InterludeError {
   }
 }
 
+/**
+ * `waitSettled` ran out of time with diffs still pending.
+ *
+ * The node answered; Monad has not taken the batch. Commits may have stopped, or the interval
+ * is longer than the timeout you passed.
+ */
+export class SettlementTimeoutError extends InterludeError {
+  override name = "SettlementTimeoutError";
+  constructor(
+    readonly pending: number,
+    readonly committedBatches: number,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `pending diffs did not settle in ${timeoutMs}ms (still ${pending}, batch ${committedBatches})`,
+    );
+  }
+}
+
+/**
+ * The transaction `settled` was waiting for is gone: the node no longer has a receipt for it and
+ * no batch it committed carries it.
+ *
+ * That is what a node restart that dropped its pending state looks like. The call executed and
+ * answered, but it was never committed and never will be, so the page should say so rather than
+ * report it settled because `pendingDiffs` happens to be empty on a fresh node.
+ */
+export class SettlementLostError extends InterludeError {
+  override name = "SettlementLostError";
+  constructor(
+    readonly hash: Hex,
+    readonly committedBatches: number,
+  ) {
+    super(
+      `transaction ${hash} is not in any batch this node committed (${committedBatches} so far) ` +
+        `and the node no longer knows it, so it will never settle. The node most likely ` +
+        `restarted and dropped what it had not committed yet; send the call again.`,
+    );
+  }
+}
+
 /** A stored session exists but does not match what was asked for, or is no longer usable. */
 export class SessionUnusableError extends InterludeError {
   override name = "SessionUnusableError";
+}
+
+/**
+ * The node refused a transaction to keep its next commit sellable: the open batch is full, or
+ * this call would push the pending diffs over `maxDiffsPerCommit`.
+ *
+ * Nothing executed and the nonce was not consumed. `retryable` is the node's own verdict: true
+ * means the next commit makes room, and `send` already waited and retried before throwing this;
+ * false means this one call is too large to ever fit, and retrying it is pointless.
+ */
+export class NodeBusyError extends InterludeError {
+  override name = "NodeBusyError";
+  /**
+   * `"batch"`: the open batch is full, as above. `"limit"`: the node's front door refused the
+   * request before looking at it — too many requests from this caller or this signer, too many
+   * in flight (JSON-RPC -32005, or HTTP 429) — and `retryAfterMs` is how long it asked for.
+   */
+  readonly kind: "batch" | "limit";
+  readonly retryAfterMs: number | undefined;
+  constructor(
+    readonly retryable: boolean,
+    readonly detail: string,
+    override readonly cause?: unknown,
+    options?: { kind?: "batch" | "limit"; retryAfterMs?: number },
+  ) {
+    const kind = options?.kind ?? "batch";
+    super(
+      kind === "limit"
+        ? `the node is rate limiting this caller (${detail}). The SDK waited and retried where ` +
+            `it could; slow down, or try again in a moment.`
+        : retryable
+          ? `the node's open batch has no room for this call until its next commit (${detail}). ` +
+            `The SDK retried with backoff and gave up; try again in a moment, or lower the rate.`
+          : `this call can never fit in one batch (${detail}): it writes more than the ` +
+            `delegation's maxDiffsPerCommit allows. Split the work into smaller calls.`,
+    );
+    this.kind = kind;
+    this.retryAfterMs = options?.retryAfterMs;
+  }
+}
+
+/**
+ * The node at this url serves a different app than the client was configured with.
+ *
+ * Every node serves exactly one contract. The usual cause is a copied `node` url from another
+ * floor, or an `app` address from a previous deployment.
+ */
+export class WrongNodeError extends InterludeError {
+  override name = "WrongNodeError";
+  constructor(
+    readonly url: string,
+    readonly served?: Address,
+    readonly expected?: Address,
+  ) {
+    super(
+      `the Interlude node at ${url} serves ${served ?? "another app"}, not ` +
+        `${expected ?? "the app this call was addressed to"}. Each node serves one contract: ` +
+        `pass the node url that was printed for your app, or the app address this node was ` +
+        `started for.`,
+    );
+  }
+}
+
+/**
+ * The call ran and tried to write state the delegation does not cover, so the node dropped it
+ * whole: another contract's storage, or a slot of this app that was never delegated.
+ *
+ * Not a revert of the app's own rules. With a per-key delegation it usually means the session's
+ * granter is not the key this node was delegated for.
+ */
+export class WriteOutsideDelegationError extends InterludeError {
+  override name = "WriteOutsideDelegationError";
+  constructor(
+    readonly detail: string,
+    override readonly cause?: unknown,
+  ) {
+    super(
+      `the node refused the call because it writes outside the delegation (${detail}). The ` +
+        `node can only commit the state it was handed: with a per-key delegation, check that ` +
+        `the user is the key that was delegated; otherwise delegate the slot or the mapping.`,
+    );
+  }
+}
+
+/**
+ * The wallet is connected to another chain than the base chain the app lives on.
+ *
+ * Checked before anything is sent or signed: an on-chain write sent to the wrong network would
+ * "succeed" against an empty address, and a wallet asked to sign a grant for another chain
+ * refuses with a message that names neither chain. `client.ensureChain(wallet)` switches, or
+ * adds, the base chain.
+ */
+export class WrongChainError extends InterludeError {
+  override name = "WrongChainError";
+  constructor(
+    readonly expected: number,
+    readonly actual: number,
+    readonly action: string,
+  ) {
+    super(
+      `${action} has to happen on chain ${expected}, the app's base chain, but the wallet is ` +
+        `on chain ${actual}. Switch networks in the wallet (client.ensureChain(wallet) asks it ` +
+        `to) and try again; nothing was sent or signed.`,
+    );
+  }
+}
+
+/**
+ * This session's grant was revoked with `revokeAll`, so the client refuses to use its key.
+ *
+ * The honest part is in the message: the revocation is final on the base chain, but a node
+ * reads the session epoch at the block its delegation was pinned to. Until that delegation is
+ * reopened the node still accepts the old grant from whoever holds the key, and refuses a fresh
+ * grant with `SessionEpochStale`. The grant's expiry is what bounds a stolen key meanwhile.
+ */
+export class SessionRevokedError extends InterludeError {
+  override name = "SessionRevokedError";
+  constructor(
+    readonly granter: Address,
+    readonly grantEpoch: bigint,
+  ) {
+    super(
+      `the session grant from ${granter} (epoch ${grantEpoch}) was revoked with revokeAll(), ` +
+        `so this client will not sign with its key again. Note the node's lag: it reads the ` +
+        `epoch at the block its delegation was pinned to, so until the delegation is reopened ` +
+        `the node still honours the old grant for whoever holds the key (its expiry bounds ` +
+        `that), and refuses a new grant with SessionEpochStale.`,
+    );
+  }
+}
+
+/**
+ * The call executed on the node, but its response was lost on the way back and the node's
+ * stored receipt does not carry return data, so there is no result to decode.
+ *
+ * Thrown instead of sending again: the SDK found the transaction by its hash, so it knows the
+ * call happened, and re-signing it would have run the action twice. `receipt` says whether it
+ * succeeded.
+ */
+export class ResultUnavailableError extends InterludeError {
+  override name = "ResultUnavailableError";
+  constructor(
+    readonly hash: Hex,
+    readonly receipt: { status: Hex; transactionHash: Hex },
+  ) {
+    super(
+      `the call ${hash} executed on the node (status ${receipt.status}) but its response was ` +
+        `lost, and the node's receipt carries no return data. It was not sent again, so do not ` +
+        `retry it blindly: read the state it changed instead.`,
+    );
+  }
 }
 
 // --- reverts the session machinery raises --------------------------------
@@ -78,11 +270,18 @@ export class SelectorOutOfSessionScopeError extends InterludeError {
 
 export class SessionEpochStaleError extends InterludeError {
   override name = "SessionEpochStaleError";
+  /**
+   * True when the hub agrees with the grant and it is the node that is behind: it pinned its
+   * delegation before the user's last `bumpSessionEpoch()`, and a fresh grant will keep being
+   * refused until the delegation is reopened. Signing again does not help in that case.
+   */
+  readonly pinnedByNode: boolean;
   constructor(
     readonly grantEpoch: bigint,
     readonly hubEpoch?: bigint,
   ) {
     super(explainEpoch(grantEpoch, hubEpoch));
+    this.pinnedByNode = hubEpoch !== undefined && hubEpoch === grantEpoch;
   }
 }
 
@@ -219,11 +418,19 @@ export class NotRegisteredError extends InterludeError {
   }
 }
 
-/** One of `Delegatable`'s access or bookkeeping reverts, which a session call rarely sees. */
+/**
+ * One of `Delegatable`'s access or bookkeeping reverts, which a session call rarely sees.
+ *
+ * `args` are the error's own, decoded: `TermsRejected` carries the validator whose terms refused.
+ */
 export class DelegatableError extends InterludeError {
   override name = "DelegatableError";
-  constructor(readonly errorName: string) {
-    super(`the app reverted with ${errorName}, raised by Delegatable rather than by the app.`);
+  constructor(
+    readonly errorName: string,
+    readonly args: readonly unknown[] = [],
+  ) {
+    const called = args.length ? `${errorName}(${args.map(format).join(", ")})` : errorName;
+    super(`the app reverted with ${called}, raised by Delegatable rather than by the app.`);
   }
 }
 
@@ -291,7 +498,7 @@ export function decodeRevert(
   }
 
   const session = decodeAgainst(data, delegatableErrorsAbi);
-  if (session) return sessionError(session.errorName, context);
+  if (session) return sessionError(session.errorName, session.args ?? [], context);
 
   // Also covers `Error(string)` and `Panic(uint256)`, which viem knows without being told.
   const own = decodeAgainst(data, abi);
@@ -311,7 +518,11 @@ function decodeAgainst(
   }
 }
 
-function sessionError(errorName: string, ctx: RevertContext): InterludeError {
+function sessionError(
+  errorName: string,
+  args: readonly unknown[],
+  ctx: RevertContext,
+): InterludeError {
   const selector = ctx.selector ?? "0x00000000";
 
   switch (errorName) {
@@ -355,7 +566,7 @@ function sessionError(errorName: string, ctx: RevertContext): InterludeError {
     case "NotRegistered":
       return new NotRegisteredError();
     default:
-      return new DelegatableError(errorName);
+      return new DelegatableError(errorName, args);
   }
 }
 
@@ -378,8 +589,9 @@ function explainEpoch(grantEpoch: bigint, hubEpoch?: bigint): string {
   return (
     `${head}, even though the hub reports ${hubEpoch} on the base chain. The node reads the ` +
     `epoch at the block its delegation pinned, so a bump made after that block is not visible ` +
-    `to it yet and a grant naming the new epoch looks stale from where it stands. It clears ` +
-    `when the delegation is reopened; until then the old grant's expiry is what bounds it.`
+    `to it yet and a grant naming the new epoch looks stale from where it stands. Signing ` +
+    `again will not help: it clears only when the app owner reopens the delegation. The ` +
+    `same lag means the revoked grant still works on this node until it expires.`
   );
 }
 

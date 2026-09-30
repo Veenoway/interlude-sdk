@@ -1,0 +1,40 @@
+# What a node should serve, and how to put it on a chain.
+#
+# `interlude ship` sends the bytecode, these constructor arguments and any [[setup]] calls to
+# the hosted control plane, which deploys Clicker on Monad testnet, delegates it and starts a
+# node for it. `interlude dev` does the same on your laptop against a local anvil.
+
+[app]
+# src/Clicker.sol
+contract = "Clicker"
+args = [
+  "$HUB", # address hub_ — the hub; dev and ship fill it in
+]
+
+# "all" hands over the whole contract (the GLOBAL partition). It is the only shape the hosted
+# node serves, which is why Clicker's variables are annotated "global".
+delegate = "all"
+
+# Who owns Clicker on Monad after `ship`. Without it, the owner is Interlude's deploy key.
+# `ship --owner 0x...` does the same. That address then calls acceptOwnership() once.
+# owner = "0x..."
+
+# Calls to make before delegating. Anything that seeds delegated state belongs here: once the
+# partition is handed over, whenNotDelegated refuses base-chain writes to it. `ship` runs them
+# from the deploying key, which is the owner at that point; $HUB is the only placeholder it knows.
+# [[setup]]
+# signature = "yourSeedFunction(uint256)"
+# args = ["100"]
+
+[node]
+port = 8555
+# Must differ from the base chain's, or Delegatable.isEphemeral() returns false and every
+# delegated write reverts.
+chain_id = 4242
+commit_interval = 5
+
+# `interlude dev` only: where it writes the local addresses for the web app. `ship` writes the
+# same three names with --out ../web/.env.local.
+[env]
+file = "../web/.env.local"
+vars = { NEXT_PUBLIC_INTERLUDE_APP = "$APP", NEXT_PUBLIC_INTERLUDE_NODE = "$NODE_RPC", NEXT_PUBLIC_INTERLUDE_BASE_RPC = "$BASE_RPC" }

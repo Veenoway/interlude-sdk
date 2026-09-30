@@ -9,7 +9,7 @@
 
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { ArtifactError } from "./artifacts.js";
+import { ArtifactError, bundledDir } from "./artifacts.js";
 
 export const CONTRACTS_REMAPPING = "@interludelayer/contracts/";
 
@@ -39,7 +39,7 @@ export function findInterludeContracts(startFrom: string): string {
     at = up;
   }
 
-  const bundled = resolve(dirname(new URL(import.meta.url).pathname), "..", "contracts");
+  const bundled = bundledDir(import.meta.url, "contracts");
   if (existsSync(join(bundled, "Delegatable.sol"))) return bundled;
 
   throw new ArtifactError(
@@ -63,12 +63,17 @@ export function remappingLine(projectRoot: string, contractsDir: string): string
  * shape as forge-std, and `lib/` is always allowed.
  *
  * Sources already inside the project are left where they are: that is the Interlude
- * checkout, and a second copy under lib/ would drift.
+ * checkout, and a second copy under lib/ would drift. The exception is a copy inside the
+ * project's own `node_modules/` (`npm i -D @interludelayer-sdk/cli`): pointing the remapping
+ * there compiles today and breaks on the next `npm ci`, pnpm's store layout or a pruned
+ * install, so it is vendored like the `npx` case — which is also what the README promises.
  */
 export function vendorContracts(projectRoot: string, contractsDir: string): string {
   const from = resolve(contractsDir);
   const root = resolve(projectRoot);
-  if (from === root || from.startsWith(`${root}${sep}`)) return from;
+  const inside = from === root || from.startsWith(`${root}${sep}`);
+  const installed = from.split(sep).includes("node_modules");
+  if (inside && !installed) return from;
 
   const dest = join(root, "lib", "interlude");
   mkdirSync(dest, { recursive: true });

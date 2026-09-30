@@ -1,11 +1,14 @@
 import {
   decodeAbiParameters,
   decodeFunctionResult,
+  defineChain,
   encodeFunctionData,
+  keccak256,
   slice,
   type Abi,
   type Account,
   type Address,
+  type Chain,
   type Client,
   type ContractFunctionArgs,
   type ContractFunctionName,
@@ -14,17 +17,31 @@ import {
   type Transport,
   type WalletClient,
 } from "viem";
-import { call, getChainId, getTransactionCount, readContract, writeContract } from "viem/actions";
+import {
+  addChain,
+  call,
+  getChainId,
+  getTransactionCount,
+  readContract,
+  switchChain,
+  writeContract,
+} from "viem/actions";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
-import { delegatableAbi, delegatableErrorsAbi, hubAbi } from "./abi";
+import { delegatableAbi, delegatableErrorsAbi, GLOBAL_PARTITION, hubAbi } from "./abi";
 import {
   InterludeError,
+  NodeBusyError,
+  NodeUnreachableError,
+  ResultUnavailableError,
   SelectorOutOfSessionScopeError,
   SessionEpochStaleError,
   SessionExpiredError,
   SessionNotSignedByGranterError,
+  SessionRevokedError,
   SessionUnusableError,
+  WrongChainError,
+  WrongNodeError,
   WrongSessionKeyError,
   decodeRevert,
   type RevertContext,
@@ -46,16 +63,26 @@ import {
   type StoredSession,
 } from "./storage";
 import {
+  classifyNodeError,
   createNodeClient,
+  createSendRouter,
+  getReceipt,
   interludeCommit,
   interludeSession,
+  isMethodNotFound,
+  rpcCode,
   sendCompatible,
   sendFast,
+  sleep,
   succeeded,
+  waitSettled,
   type InterludeReceipt,
+  type NodeClient,
   type SessionStatus,
+  type SettledStatus,
+  type WaitSettledOptions,
 } from "./transport";
-import { watchApplied, type AppliedCall } from "./watch";
+import { createAppliedFeed, type AppliedCall, type AppliedFeed, type WatchOptions } from "./watch";
 
 /** One hour. Short enough that a forgotten tab stops mattering, long enough to play in. */
 export const DEFAULT_EXPIRY_SECONDS = 3600;
@@ -70,16 +97,65 @@ const DEFAULT_GAS = 5_000_000n;
 /** A grant this close to expiry is treated as spent: better one prompt than a failed call. */
 const DEFAULT_EXPIRY_MARGIN_SECONDS = 15;
 
+/** How many times a call the node parked for backpressure is sent again before giving up. */
+const DEFAULT_BUSY_RETRIES = 5;
+
+/** The longest single wait `send` sits through for backpressure before handing it back. */
+const MAX_BUSY_WAIT_MS = 5_000;
+
+/** A watched view is re-read at most this often, however many calls land in between. */
+const DEFAULT_WATCH_MIN_INTERVAL_MS = 50;
+
+/** How often a watched view polls while the node's socket is down. */
+const DEFAULT_WATCH_FALLBACK_MS = 500;
+
+/**
+ * Base chains the SDK can add to a wallet by itself.
+ *
+ * Spelled out rather than imported from `viem/chains`, so that a host on an older viem that
+ * predates the entry still builds.
+ */
+const KNOWN_BASE_CHAINS: Record<number, Chain> = {
+  10143: defineChain({
+    id: 10143,
+    name: "Monad Testnet",
+    nativeCurrency: { name: "Monad", symbol: "MON", decimals: 18 },
+    rpcUrls: { default: { http: ["https://testnet-rpc.monad.xyz"] } },
+    blockExplorers: {
+      default: { name: "Monad Explorer", url: "https://testnet.monadexplorer.com" },
+    },
+    testnet: true,
+  }),
+};
+
 type Writable = "nonpayable" | "payable";
 type Readable = "view" | "pure";
+
+/**
+ * A function's arguments as a rest parameter: required when it takes any, optional when it
+ * takes none.
+ *
+ * `send("move")` for a `move(uint256)` used to compile, because `args` was optional for every
+ * function, and failed at run time in the ABI encoder. An ABI that is not `as const` has
+ * unknown arguments, so they stay optional there rather than becoming impossible to omit.
+ */
+export type ArgsParameter<TArgs> = readonly [] extends TArgs ? [args?: TArgs] : [args: TArgs];
 
 export interface SendResult<TResult> {
   /** The inner call's return value, decoded out of the wrapper's `bytes`. */
   result: TResult;
   receipt: InterludeReceipt;
   hash: Hex;
-  /** Wall clock for the whole call: signing with the session key and the round trip. */
+  /** Wall clock for the whole call: waiting its turn, signing with the session key, the round trip. */
   latencyMs: number;
+  /**
+   * Resolves when a batch carrying this transaction is committed on the base chain, with the
+   * batch's index. Rejects with `SettlementLostError` if the node forgets the transaction (a
+   * restart that dropped what it had not committed; see `WaitSettledOptions.lostAfterMs` for
+   * the grace a frozen batch gets), and with `SettlementTimeoutError` after
+   * 60 s. Lazy: unused `settled` does not poll.
+   */
+  settled: Promise<SettledStatus>;
 }
 
 export interface Session<TAbi extends Abi> {
@@ -97,13 +173,14 @@ export interface Session<TAbi extends Abi> {
   /** Whether the grant admits a function, by name, signature or selector. */
   covers(entry: ScopeEntry): boolean;
 
-  send<
-    TFunctionName extends ContractFunctionName<TAbi, Writable>,
-    TArgs extends ContractFunctionArgs<TAbi, Writable, TFunctionName>,
-  >(
+  /**
+   * One gasless call. Calls from one session key go out one at a time, in the order they were
+   * made, so their nonces reach the node in order however many are awaited at once.
+   */
+  send<TFunctionName extends ContractFunctionName<TAbi, Writable>>(
     functionName: TFunctionName,
-    args?: TArgs,
-  ): Promise<SendResult<ContractFunctionReturnType<TAbi, Writable, TFunctionName, TArgs>>>;
+    ...args: ArgsParameter<ContractFunctionArgs<TAbi, Writable, TFunctionName>>
+  ): Promise<SendResult<ContractFunctionReturnType<TAbi, Writable, TFunctionName>>>;
 
   /** Forget the key and the grant. The grant stays valid on chain until it expires. */
   discard(): void;
@@ -133,6 +210,12 @@ export interface OpenSessionOptions {
    * throw naming both digests.
    */
   assertDigest?: boolean;
+  /**
+   * Ask the wallet to switch to (or add) the base chain when it is on another one, instead of
+   * throwing `WrongChainError`. A browser wallet refuses to sign a grant whose EIP-712 domain
+   * names another chain than the active one, with a message that names neither.
+   */
+  ensureChain?: boolean;
 }
 
 export interface InterludeClientConfig<TAbi extends Abi> {
@@ -142,7 +225,13 @@ export interface InterludeClientConfig<TAbi extends Abi> {
   abi: TAbi;
   /** The node's JSON-RPC url. Also what an unreachable-node error names. */
   node: string;
-  /** How to reach it, when a plain POST to `node` is not it: an API key, a proxy of your own. */
+  /**
+   * How to reach it, when a plain POST to `node` is not it: an API key, a proxy of your own.
+   *
+   * Used for reads and for sends alike. Transactions are protected either way — before a call
+   * is ever signed again the SDK looks the first one up by its hash — but a transport that
+   * does not retry on its own is what keeps a lost response to one round trip.
+   */
   transport?: Transport;
   /**
    * A viem client on the base chain.
@@ -157,8 +246,10 @@ export interface InterludeClientConfig<TAbi extends Abi> {
   expiryMarginSeconds?: number;
   gas?: bigint;
   /**
-   * Force the transport. Left unset the SDK probes once and uses `interlude_sendTransaction`
-   * when the node serves it, which is where the single-round-trip latency comes from.
+   * Force the transport. Left unset the SDK probes and uses `interlude_sendTransaction` when
+   * the node serves it, which is where the single-round-trip latency comes from. A probe that
+   * fails for a reason other than "no such method" is not remembered, so a node that was
+   * booting when the page loaded is not treated as an old one for the rest of the tab.
    */
   fastPath?: boolean;
   /**
@@ -166,12 +257,27 @@ export interface InterludeClientConfig<TAbi extends Abi> {
    * `INTERLUDE_COMMIT_TOKEN`. Leave unset against a local node.
    */
   commitToken?: string;
+  /**
+   * How many times a call the node refused for backpressure (`NodeBusyError`, retryable) is
+   * sent again before the error is thrown: a full batch waits 150 ms, doubling; a rate limit
+   * (-32005, HTTP 429) waits what the node's `retryAfterSecs` asks, unless that is over 5 s.
+   * Always the same signed transaction. Default 5; 0 throws on the first refusal.
+   */
+  busyRetries?: number;
+  /** Tuning for `watchRead` / `useWatch`. */
+  watch?: {
+    /** A view is re-read at most this often, however many calls land. Default 50 ms. */
+    minIntervalMs?: number;
+    /** How often a view polls while the socket is down. Default 500 ms. */
+    fallbackMs?: number;
+  };
 }
 
 export interface InterludeClient<TAbi extends Abi> {
   readonly app: Address;
   readonly abi: TAbi;
-  readonly node: ReturnType<typeof createNodeClient>;
+  /** The node client used for reads. Sends go through a transport that never retries. */
+  readonly node: NodeClient;
   readonly base: Client;
 
   /** The base chain's id, which is what the grant's EIP-712 domain names. */
@@ -185,53 +291,60 @@ export interface InterludeClient<TAbi extends Abi> {
 
   /** What the node is serving, and what is waiting to be committed. */
   status(): Promise<SessionStatus>;
+  /**
+   * Wait until what was sent is committed on the base chain.
+   *
+   * Pass `hash` (a `send` result's `hash`) to follow that one transaction into a committed
+   * batch; that is what `SendResult.settled` does, and the only form that notices a call a
+   * restarted node dropped. Without it, waits for everything the node had executed when this
+   * was called. Times out rather than hanging if commits have stopped.
+   */
+  waitSettled(options?: WaitSettledOptions): Promise<SettledStatus>;
   /** Publish the pending diffs now instead of waiting out the node's interval. */
   commit(): Promise<{ transactionHash: Hex }>;
 
-  /** A view call against the node's live state, which is ahead of the chain's. */
-  read<
-    TFunctionName extends ContractFunctionName<TAbi, Readable>,
-    TArgs extends ContractFunctionArgs<TAbi, Readable, TFunctionName>,
-  >(
+  /**
+   * A view call against the node's live state, which is ahead of the chain's.
+   *
+   * Live only for state the node holds: a view over delegated slots reads what the node has
+   * executed, while anything else it touches is read at the block the delegation was pinned.
+   */
+  read<TFunctionName extends ContractFunctionName<TAbi, Readable>>(
     functionName: TFunctionName,
-    args?: TArgs,
-  ): Promise<ContractFunctionReturnType<TAbi, Readable, TFunctionName, TArgs>>;
+    ...args: ArgsParameter<ContractFunctionArgs<TAbi, Readable, TFunctionName>>
+  ): Promise<ContractFunctionReturnType<TAbi, Readable, TFunctionName>>;
 
   /**
    * Hear every call as the node runs it.
    *
    * The payload is what the ephemeral EVM just did — app, calldata, return, logs — the same
    * for every contract. Re-read a view in the callback, or use `watchRead`. A node that does
-   * not serve the socket falls back to polling so a page still moves.
+   * not serve the socket falls back to polling so a page still moves. Every watcher on a client
+   * shares one socket.
    */
-  watch(onCall: (call: AppliedCall) => void): () => void;
+  watch(onCall: (call: AppliedCall) => void, options?: WatchOptions): () => void;
 
   /**
    * Re-read a view every time the node applies a call, and once on subscribe.
    *
    * Any view: `boardOf`, `floor`, `balanceOf`. The socket does not know the function. It
-   * only says that state moved, then this reads the live value.
+   * only says that state moved, then this reads the live value. Watchers of the same view with
+   * the same arguments share one read; at most one read per view is in flight, a burst of calls
+   * collapses into one trailing read, and a response older than one already delivered is
+   * dropped, so a value never goes backwards.
    */
-  watchRead<
-    TFunctionName extends ContractFunctionName<TAbi, Readable>,
-    TArgs extends ContractFunctionArgs<TAbi, Readable, TFunctionName>,
-  >(
+  watchRead<TFunctionName extends ContractFunctionName<TAbi, Readable>>(
     functionName: TFunctionName,
-    args: TArgs | undefined,
-    onValue: (
-      value: ContractFunctionReturnType<TAbi, Readable, TFunctionName, TArgs>,
-    ) => void,
+    args: ContractFunctionArgs<TAbi, Readable, TFunctionName> | undefined,
+    onValue: (value: ContractFunctionReturnType<TAbi, Readable, TFunctionName>) => void,
     onError?: (error: Error) => void,
   ): () => void;
 
   /** The same view call against the base chain: the last committed value. */
-  readSettled<
-    TFunctionName extends ContractFunctionName<TAbi, Readable>,
-    TArgs extends ContractFunctionArgs<TAbi, Readable, TFunctionName>,
-  >(
+  readSettled<TFunctionName extends ContractFunctionName<TAbi, Readable>>(
     functionName: TFunctionName,
-    args?: TArgs,
-  ): Promise<ContractFunctionReturnType<TAbi, Readable, TFunctionName, TArgs>>;
+    ...args: ArgsParameter<ContractFunctionArgs<TAbi, Readable, TFunctionName>>
+  ): Promise<ContractFunctionReturnType<TAbi, Readable, TFunctionName>>;
 
   /**
    * Restore the stored session if there is one, and only prompt the wallet when there is not.
@@ -249,8 +362,22 @@ export interface InterludeClient<TAbi extends Abi> {
   /**
    * The panic button: invalidate every grant this user has signed, for every app, in one
    * transaction on the base chain.
+   *
+   * Read the limit before wiring it to a button. The base chain forgets the grants at once and
+   * this client refuses to use them again (`SessionRevokedError`). A node, however, reads the
+   * session epoch at the block its delegation was pinned to: until the app owner reopens the
+   * delegation it still accepts the old grant from whoever holds the key — its expiry is the
+   * bound on a stolen key — and it refuses any new grant with `SessionEpochStaleError`
+   * (`pinnedByNode: true`), so the user cannot play on that node until then.
    */
   revokeAll(wallet: WalletClient, account?: Account | Address): Promise<Hex>;
+
+  /**
+   * Put the wallet on the base chain: switch, or add the chain first if the wallet does not
+   * know it. Resolves when the wallet reports the right chain; throws `WrongChainError` when it
+   * cannot get there.
+   */
+  ensureChain(wallet: WalletClient): Promise<void>;
 
   /** The digest the app computes for a grant, for comparing against the SDK's own. */
   sessionDigestOnChain(grant: SessionGrant): Promise<Hex>;
@@ -268,7 +395,42 @@ export interface InterludeClient<TAbi extends Abi> {
     key: Hex,
     options?: { account?: Account | Address; value?: bigint },
   ): Promise<Hex>;
+  /** Owner-only, on Monad: lift the lock when the session is done. Stake stays reserved. */
+  undelegate(
+    wallet: WalletClient,
+    partition?: Hex,
+    options?: { account?: Account | Address },
+  ): Promise<Hex>;
+  /**
+   * After the challenge window: free the validator's reserved stake.
+   * Permissionless once `stakeUnlockAt` has passed; reverts with `StakeStillLocked` before that.
+   * Does not wait — call it when the window is over (or from a keeper).
+   */
+  releaseStake(
+    wallet: WalletClient,
+    partition?: Hex,
+    options?: { account?: Account | Address },
+  ): Promise<Hex>;
 }
+
+/**
+ * Everything one session key needs to send in order: its place in the nonce sequence and the
+ * tail of its queue.
+ *
+ * Per key and per client rather than per `Session` object, because restoring the same stored
+ * session twice yields two objects signing with one key, and two counters for one key is how
+ * nonces collide.
+ */
+interface Lane {
+  nonce: number | undefined;
+  tail: Promise<void>;
+}
+
+/** What one delivery of one signed transaction came to. */
+type Delivery =
+  | { kind: "receipt"; receipt: InterludeReceipt; recovered: boolean }
+  | { kind: "no-fast-path" }
+  | { kind: "nonce"; error: unknown };
 
 export function createInterludeClient<TAbi extends Abi>(
   config: InterludeClientConfig<TAbi>,
@@ -280,14 +442,53 @@ export function createInterludeClient<TAbi extends Abi>(
   const gas = config.gas ?? DEFAULT_GAS;
   const expirySeconds = config.expirySeconds ?? DEFAULT_EXPIRY_SECONDS;
   const margin = BigInt(config.expiryMarginSeconds ?? DEFAULT_EXPIRY_MARGIN_SECONDS);
+  const busyRetries = config.busyRetries ?? DEFAULT_BUSY_RETRIES;
+  const watchMinInterval = config.watch?.minIntervalMs ?? DEFAULT_WATCH_MIN_INTERVAL_MS;
+  const watchFallbackMs = config.watch?.fallbackMs ?? DEFAULT_WATCH_FALLBACK_MS;
 
   // Everything the app itself can be asked for is asked for once. None of it can change for a
   // given deployment, and a read per call would show up in the latency this SDK exists to keep.
-  let baseChainIdOnce: Promise<number> | undefined;
-  let ephemeralChainIdOnce: Promise<number> | undefined;
-  let hubOnce: Promise<Address> | undefined;
+  // Only answers are kept: a failure — the node's 502 while it boots, a 429 from a public RPC —
+  // is forgotten, so the next call asks again instead of the tab being dead until a reload.
+  const baseChainId = remember(async () => base.chain?.id ?? (await getChainId(base)));
+  const ephemeralChainId = remember(() => getChainId(node));
+  const hubAddress = remember(() =>
+    readContract(base, { address: app, abi: delegatableAbi, functionName: "hub" }),
+  );
+
   let fastPath: boolean | undefined = config.fastPath;
-  let fastPathProbe: Promise<boolean> | undefined;
+  let probing: Promise<boolean> | undefined;
+
+  // Sends go through a transport that never retries or falls back by itself; see
+  // `createSendClient`. A socket that loses a send rests: sends go over HTTP for a while, longer
+  // for each loss in a row, and then over a fresh socket again (`createSendRouter`). A transport
+  // the app handed in is used as it is, for everything.
+  const router = config.transport ? undefined : createSendRouter(url);
+  const sender = (): { client: Client; via: "ws" | "http" | "custom" } =>
+    router ? router.client() : { client: node, via: "custom" };
+  const sendLost = (via: "ws" | "http" | "custom") => {
+    if (router && via !== "custom") router.lost(via);
+  };
+  const sendArrived = (via: "ws" | "http" | "custom") => {
+    if (router && via !== "custom") router.delivered(via);
+  };
+
+  const lanes = new Map<string, Lane>();
+  const laneOf = (key: Address): Lane => {
+    const id = key.toLowerCase();
+    let lane = lanes.get(id);
+    if (!lane) {
+      lane = { nonce: undefined, tail: Promise.resolve() };
+      lanes.set(id, lane);
+    }
+    return lane;
+  };
+
+  /**
+   * Grants this client has revoked, by granter: every grant naming an epoch at or below the
+   * value is dead here, whatever a node that pinned earlier would still accept.
+   */
+  const revokedThrough = new Map<string, bigint>();
 
   /** The app's ABI plus every revert it inherits, so a decode covers both authors. */
   const decodable = [...abi, ...delegatableErrorsAbi] as unknown as Abi;
@@ -296,35 +497,42 @@ export function createInterludeClient<TAbi extends Abi>(
     return BigInt(Math.floor(Date.now() / 1000)) + margin >= expiry;
   }
 
-  function baseChainId(): Promise<number> {
-    baseChainIdOnce ??= Promise.resolve(base.chain?.id ?? getChainId(base));
-    return baseChainIdOnce;
-  }
-
-  function ephemeralChainId(): Promise<number> {
-    ephemeralChainIdOnce ??= getChainId(node);
-    return ephemeralChainIdOnce;
-  }
-
-  function hubAddress(): Promise<Address> {
-    hubOnce ??= readContract(base, { address: app, abi: delegatableAbi, functionName: "hub" });
-    return hubOnce;
+  function isRevoked(grant: SessionGrant): boolean {
+    const through = revokedThrough.get(grant.granter.toLowerCase());
+    return through !== undefined && grant.epoch <= through;
   }
 
   /**
    * Whether the node serves the single-round-trip send.
    *
    * Probed with `interlude_session`, which is on the same trait and changes nothing: a probe
-   * that submitted a transaction to find out would have to decide what to do with it.
+   * that submitted a transaction to find out would have to decide what to do with it. Only two
+   * answers are kept — it answered, or it said it has no such method. Anything else (a dropped
+   * connection, a node still booting) says nothing about the method, so the fast path is tried
+   * and the probe runs again next time; `sendFast` itself degrades if the method is missing.
    */
   async function hasFastPath(): Promise<boolean> {
     if (fastPath !== undefined) return fastPath;
-    fastPathProbe ??= interludeSession(node, url).then(
-      () => true,
-      () => false,
-    );
-    fastPath = await fastPathProbe;
-    return fastPath;
+    probing ??= (async () => {
+      try {
+        const status = await interludeSession(node, url);
+        if (status.app && status.app.toLowerCase() !== app.toLowerCase()) {
+          throw new WrongNodeError(url, status.app, app);
+        }
+        fastPath = true;
+        return true;
+      } catch (error) {
+        if (error instanceof WrongNodeError) throw error;
+        if (isMethodNotFound(error)) {
+          fastPath = false;
+          return false;
+        }
+        return true;
+      } finally {
+        probing = undefined;
+      }
+    })();
+    return probing;
   }
 
   async function epochOf(user: Address): Promise<bigint> {
@@ -349,20 +557,75 @@ export function createInterludeClient<TAbi extends Abi>(
     });
   }
 
-  async function readOn<
-    TFunctionName extends ContractFunctionName<TAbi, Readable>,
-    TArgs extends ContractFunctionArgs<TAbi, Readable, TFunctionName>,
-  >(
-    client: Client,
-    functionName: TFunctionName,
-    args?: TArgs,
-  ): Promise<ContractFunctionReturnType<TAbi, Readable, TFunctionName, TArgs>> {
-    return readContract(client, {
-      address: app,
-      abi,
-      functionName,
-      args,
-    } as never) as Promise<ContractFunctionReturnType<TAbi, Readable, TFunctionName, TArgs>>;
+  /**
+   * A view call, with a revert coming back as the app's own error.
+   *
+   * The node answers a reverted `eth_call` the standard way, JSON-RPC error 3 "execution
+   * reverted" with the revert bytes as `data` (it used to hand them back as the call's result,
+   * which viem then failed to decode as a return value). Those bytes are decoded against the
+   * app's ABI and Delegatable's errors, exactly like a failed `send`, so a `read` that reverts
+   * with `Frozen(7)` throws `AppRevertError` "Frozen" rather than viem's generic wrapper. A
+   * halt with no data at all becomes `UnrecognisedRevertError("0x")`.
+   */
+  async function readOn(client: Client, functionName: string, args: unknown): Promise<unknown> {
+    try {
+      return await readContract(client, { address: app, abi, functionName, args } as never);
+    } catch (error) {
+      if (client === node) {
+        const typed = classifyNodeError(error, url);
+        if (typed) throw typed;
+      }
+      if (rpcCode(error) === EXECUTION_REVERTED) {
+        throw decodeRevert(revertDataOf(error) ?? "0x", decodable, { functionName });
+      }
+      throw error;
+    }
+  }
+
+  /** The chain the wallet is on now, or `undefined` when it will not say. */
+  async function walletChainId(wallet: WalletClient): Promise<number | undefined> {
+    try {
+      return await getChainId(wallet);
+    } catch {
+      return wallet.chain?.id;
+    }
+  }
+
+  /**
+   * Refuse to send a base-chain transaction from a wallet on another network.
+   *
+   * `revokeAll` on the wrong network used to "succeed" against whatever lives at the hub's
+   * address there — usually nothing — and then clear the stored session as if it had worked.
+   */
+  async function assertWalletChain(wallet: WalletClient, action: string): Promise<void> {
+    const expected = await baseChainId();
+    const actual = await walletChainId(wallet);
+    if (actual !== undefined && actual !== expected) {
+      throw new WrongChainError(expected, actual, action);
+    }
+  }
+
+  async function ensureChain(wallet: WalletClient): Promise<void> {
+    const expected = await baseChainId();
+    const actual = await walletChainId(wallet);
+    if (actual === expected) return;
+
+    try {
+      await switchChain(wallet, { id: expected });
+    } catch (error) {
+      const chain = base.chain?.id === expected ? base.chain : KNOWN_BASE_CHAINS[expected];
+      // 4902 is EIP-3326's "this wallet does not know that chain": add it, which also switches.
+      if (!chain || !isUnknownChain(error)) {
+        throw new WrongChainError(expected, actual ?? -1, "switching the wallet's network");
+      }
+      await addChain(wallet, { chain });
+      await switchChain(wallet, { id: expected }).catch(() => undefined);
+    }
+
+    const now = await walletChainId(wallet);
+    if (now !== undefined && now !== expected) {
+      throw new WrongChainError(expected, now, "switching the wallet's network");
+    }
   }
 
   async function openSession(options: OpenSessionOptions): Promise<Session<TAbi>> {
@@ -391,15 +654,32 @@ export function createInterludeClient<TAbi extends Abi>(
       );
     }
 
+    const chainId = await baseChainId();
+
+    // A key held in process signs whatever domain it is given. A browser wallet does not: it
+    // refuses a grant whose EIP-712 chain id is not its active chain, with an error naming
+    // neither. Say which chains, before the prompt, or switch when asked to.
+    if (typeof account === "string" || account.type === "json-rpc") {
+      if (options.ensureChain) await ensureChain(options.wallet);
+      else await assertWalletChain(options.wallet, "signing the session grant");
+    }
+
+    const epoch = await epochOf(granter);
+    const through = revokedThrough.get(granter.toLowerCase());
+    if (through !== undefined && epoch <= through) {
+      // The revocation this client sent has not landed yet, so the hub still reports the old
+      // epoch, and a grant naming it would be dead the moment it did.
+      throw new SessionRevokedError(granter, epoch);
+    }
+
     const privateKey = generatePrivateKey();
     const sessionAccount = privateKeyToAccount(privateKey);
-    const chainId = await baseChainId();
 
     const grant: SessionGrant = {
       granter,
       sessionKey: sessionAccount.address,
       expiry: BigInt(Math.floor(Date.now() / 1000) + (options.expirySeconds ?? expirySeconds)),
-      epoch: await epochOf(granter),
+      epoch,
       anyFunction,
       selectors,
     };
@@ -445,6 +725,7 @@ export function createInterludeClient<TAbi extends Abi>(
     if (stored.baseChainId !== chainId) return discard();
     if (stored.grant.granter.toLowerCase() !== granter.toLowerCase()) return discard();
     if (expired(stored.grant.expiry)) return discard();
+    if (isRevoked(stored.grant)) return discard();
 
     // The stored key has to be the one the grant names, or every call reverts with
     // `WrongSessionKey`: a grant is only ever presented by its own key.
@@ -473,30 +754,36 @@ export function createInterludeClient<TAbi extends Abi>(
     const { grant, signature, privateKey } = stored;
     const sessionAccount = privateKeyToAccount(privateKey);
     const key = storageKey(app, stored.baseChainId, grant.granter);
-
     // Kept locally and only fetched once. The node reports it, but asking per call would add a
     // round trip to every call, which is the whole thing being optimised away here.
-    let nonce: number | undefined;
+    const lane = laneOf(sessionAccount.address);
 
-    async function nextNonce(): Promise<number> {
-      nonce ??= await getTransactionCount(node, { address: sessionAccount.address });
-      return nonce++;
+    /** Run `job` after every call this key already has in flight. */
+    function enqueue<T>(job: () => Promise<T>): Promise<T> {
+      const result = lane.tail.then(job);
+      lane.tail = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
     }
 
-    async function submit(data: Hex): Promise<{ receipt: InterludeReceipt; simulated?: Hex }> {
+    async function submit(
+      data: Hex,
+      context: RevertContext,
+    ): Promise<{ receipt: InterludeReceipt; simulated?: Hex; recovered: boolean }> {
       const chainId = await ephemeralChainId();
+      let fast = await hasFastPath();
+      let resynced = false;
 
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const fast = await hasFastPath();
-
+      for (let attempt = 0; attempt < 4; attempt++) {
         // Simulating first is only for the compatible path, where the receipt carries no return
         // data and this is the only way left to learn what the call answered. It has to happen
         // before the send, or it would read the state the send left behind.
-        const simulated = fast
-          ? undefined
-          : (await call(node, { account: sessionAccount.address, to: app, data })).data;
+        const simulated = fast ? undefined : await simulate(data, context);
 
-        const claimed = await nextNonce();
+        lane.nonce ??= await getTransactionCount(node, { address: sessionAccount.address });
+        const claimed = lane.nonce;
         const raw = await sessionAccount.signTransaction({
           type: "eip1559",
           chainId,
@@ -509,49 +796,146 @@ export function createInterludeClient<TAbi extends Abi>(
           maxPriorityFeePerGas: 0n,
         });
 
-        try {
-          if (!fast) return { receipt: await sendCompatible(node, url, raw), simulated };
-
-          const receipt = await sendFast(node, url, raw);
-          if (receipt) return { receipt };
-
+        const outcome = await deliver(raw, fast);
+        if (outcome.kind === "receipt") {
+          // Whatever the receipt says, the transaction ran, so its nonce is spent.
+          lane.nonce = claimed + 1;
+          return { receipt: outcome.receipt, recovered: outcome.recovered, ...(simulated ? { simulated } : {}) };
+        }
+        if (outcome.kind === "no-fast-path") {
           // The method is not there after all, so nothing ran and the nonce is still free.
           fastPath = false;
-          nonce = claimed;
-        } catch (error) {
-          // The node keeps the nonce, so a client that lost track of it (another tab, a
-          // restarted node) has to resynchronise rather than fail the call.
-          if (attempt === 0 && isNonceComplaint(error)) {
-            nonce = undefined;
-            continue;
-          }
-          throw error;
+          fast = false;
+          continue;
         }
+        // The node keeps the nonce, so a client that lost track of it (another tab, a restarted
+        // node) has to resynchronise rather than fail the call. `deliver` already established
+        // that this transaction never ran, so signing a new one cannot run the call twice.
+        if (resynced) throw outcome.error;
+        resynced = true;
+        lane.nonce = undefined;
       }
 
       throw new InterludeError(`${url} accepted neither transport for this call`);
     }
 
-    async function send<
-      TFunctionName extends ContractFunctionName<TAbi, Writable>,
-      TArgs extends ContractFunctionArgs<TAbi, Writable, TFunctionName>,
-    >(
+    /**
+     * Get one signed transaction to the node, exactly once.
+     *
+     * Everything here resends the same signed bytes, never a new transaction: the node refuses
+     * a copy of something it already ran, so the worst a resend can do is be refused. When the
+     * outcome is unclear — the response was lost, or the node complains about the nonce — the
+     * transaction is looked up by its hash before anything else. Found means it ran, and its
+     * receipt is the answer. That is the difference between a flaky network costing one
+     * round trip and it running the user's action twice.
+     */
+    async function deliver(raw: Hex, fast: boolean): Promise<Delivery> {
+      const hash = keccak256(raw);
+      let busy = 0;
+      let resent = false;
+
+      for (;;) {
+        const { client, via } = sender();
+        try {
+          if (fast) {
+            const receipt = await sendFast(client, url, raw);
+            sendArrived(via);
+            return receipt ? { kind: "receipt", receipt, recovered: false } : { kind: "no-fast-path" };
+          }
+          const receipt = await sendCompatible(client, url, raw, node);
+          sendArrived(via);
+          return { kind: "receipt", receipt, recovered: false };
+        } catch (error) {
+          if (error instanceof NodeBusyError && error.retryable && busy < busyRetries) {
+            // Backpressure: nothing ran and the nonce is free. The next commit makes room, or
+            // the rate limiter's window rolls over; the node says how long when it knows. A
+            // wait longer than a tap can reasonably hang on is the caller's to decide.
+            const wait = error.retryAfterMs ?? Math.min(150 * 2 ** busy, 2000);
+            if (wait <= MAX_BUSY_WAIT_MS) {
+              busy++;
+              await sleep(Math.max(wait, 50));
+              continue;
+            }
+          }
+
+          const lost = error instanceof NodeUnreachableError;
+          if (lost || isNonceComplaint(error)) {
+            const known = await getReceipt(node, url, hash).catch(() => undefined);
+            if (known) return { kind: "receipt", receipt: known, recovered: true };
+            // Only a node that answered "no such transaction" licenses signing a new one. A
+            // lookup that itself failed leaves open that this one ran, and a fresh signature
+            // for it would be the double execution this function exists to prevent.
+            if (!lost && known === null) return { kind: "nonce", error };
+            if (!lost) {
+              lane.nonce = undefined;
+              throw error;
+            }
+            if (known === null && !resent) {
+              // The node answered and has never seen it: the request did not arrive. Same
+              // bytes again, over plain HTTP in case the socket is what failed — which rests
+              // the socket for later sends too, and only for a while.
+              resent = true;
+              sendLost(via);
+              continue;
+            }
+            // Could not even ask. Whether it ran is unknown, so the next call re-reads the
+            // nonce from the node instead of guessing.
+            lane.nonce = undefined;
+            throw error;
+          }
+
+          if (error instanceof WrongNodeError && !error.expected) {
+            throw new WrongNodeError(url, error.served, app);
+          }
+          throw error;
+        }
+      }
+    }
+
+    /**
+     * The compatible path's pre-flight: what the call would return.
+     *
+     * A call that would revert comes back as JSON-RPC error 3 with the revert bytes as `data`
+     * and is refused here with the decoded, typed error before anything is signed or sent.
+     * (Older nodes handed the bytes back as the result; the send then failed on its receipt
+     * and `explain` decoded the same bytes from `simulated`.) The node's own
+     * refusals (rate limit, full batch, wrong app) are typed first, as the SDK's errors rather
+     * than viem's.
+     */
+    async function simulate(data: Hex, context: RevertContext): Promise<Hex> {
+      try {
+        return (await call(node, { account: sessionAccount.address, to: app, data })).data ?? "0x";
+      } catch (error) {
+        const typed = classifyNodeError(error, url);
+        if (typed) throw typed;
+        const revert = revertDataOf(error);
+        if (revert) throw await explain(revert, context);
+        throw error;
+      }
+    }
+
+    async function send<TFunctionName extends ContractFunctionName<TAbi, Writable>>(
       functionName: TFunctionName,
-      args?: TArgs,
-    ): Promise<SendResult<ContractFunctionReturnType<TAbi, Writable, TFunctionName, TArgs>>> {
+      ...rest: ArgsParameter<ContractFunctionArgs<TAbi, Writable, TFunctionName>>
+    ): Promise<SendResult<ContractFunctionReturnType<TAbi, Writable, TFunctionName>>> {
       const started = now();
+      const args = rest[0];
 
       const inner = encodeFunctionData({ abi, functionName, args } as never);
       const selector = slice(inner, 0, 4);
 
-      // Both checked here rather than left to the contract: the revert costs a round trip and
-      // says four bytes, and the SDK knows the answer before it sends.
+      // Checked here rather than left to the contract: the revert costs a round trip and says
+      // four bytes, and the SDK knows the answer before it sends.
       if (!grantCovers(grant, selector)) {
         throw new SelectorOutOfSessionScopeError("grant", selector, String(functionName));
       }
       if (expired(grant.expiry)) {
         store.remove(key);
         throw new SessionExpiredError(grant.expiry);
+      }
+      if (isRevoked(grant)) {
+        store.remove(key);
+        throw new SessionRevokedError(grant.granter, grant.epoch);
       }
 
       const data = encodeFunctionData({
@@ -560,35 +944,50 @@ export function createInterludeClient<TAbi extends Abi>(
         args: [grant, signature, inner],
       });
 
-      const { receipt, simulated } = await submit(data);
+      const context: RevertContext = {
+        selector,
+        functionName: String(functionName),
+        granter: grant.granter,
+        sessionKey: grant.sessionKey,
+        signer: sessionAccount.address,
+        expiry: grant.expiry,
+        grantEpoch: grant.epoch,
+        scopeCheckedLocally: true,
+      };
+
+      const { receipt, simulated, recovered } = await enqueue(() => {
+        // Checked again at the head of the queue: a revocation can land while a call waits.
+        if (isRevoked(grant)) throw new SessionRevokedError(grant.granter, grant.epoch);
+        return submit(data, context);
+      });
       const latencyMs = now() - started;
 
       if (!succeeded(receipt)) {
-        throw await explain(receipt.output ?? simulated ?? (await revertData(data)), {
-          selector,
-          functionName: String(functionName),
-          granter: grant.granter,
-          sessionKey: grant.sessionKey,
-          signer: sessionAccount.address,
-          expiry: grant.expiry,
-          grantEpoch: grant.epoch,
-          scopeCheckedLocally: true,
-        });
+        throw await explain(receipt.output ?? simulated ?? (await revertData(data)), context);
       }
 
       const output = receipt.output ?? simulated;
       if (output === undefined) {
+        if (recovered) throw new ResultUnavailableError(receipt.transactionHash, receipt);
         throw new InterludeError(
           "the node answered with a receipt but no return data, and the call could not be " +
             "simulated to recover it",
         );
       }
 
+      const blockNumber = Number(BigInt(receipt.blockNumber));
       return {
-        result: decodeInner<TFunctionName, TArgs>(functionName, output),
+        result: decodeInner(functionName, output) as ContractFunctionReturnType<
+          TAbi,
+          Writable,
+          TFunctionName
+        >,
         receipt,
         hash: receipt.transactionHash,
         latencyMs,
+        settled: lazySettled(() =>
+          waitSettled(node, url, { hash: receipt.transactionHash, blockNumber }),
+        ),
       };
     }
 
@@ -599,8 +998,8 @@ export function createInterludeClient<TAbi extends Abi>(
     async function revertData(data: Hex): Promise<Hex> {
       try {
         return (await call(node, { account: sessionAccount.address, to: app, data })).data ?? "0x";
-      } catch {
-        return "0x";
+      } catch (error) {
+        return revertDataOf(error) ?? "0x";
       }
     }
 
@@ -625,20 +1024,10 @@ export function createInterludeClient<TAbi extends Abi>(
       return error;
     }
 
-    function decodeInner<
-      TFunctionName extends ContractFunctionName<TAbi, Writable>,
-      TArgs extends ContractFunctionArgs<TAbi, Writable, TFunctionName>,
-    >(
-      functionName: TFunctionName,
-      output: Hex,
-    ): ContractFunctionReturnType<TAbi, Writable, TFunctionName, TArgs> {
+    function decodeInner(functionName: string, output: Hex): unknown {
       // `withSession` returns `bytes`, so the inner call's own return value is one ABI layer in.
       const [innerReturn] = decodeAbiParameters([{ type: "bytes" }], output);
-      return decodeFunctionResult({
-        abi,
-        functionName,
-        data: innerReturn,
-      } as never) as ContractFunctionReturnType<TAbi, Writable, TFunctionName, TArgs>;
+      return decodeFunctionResult({ abi, functionName, data: innerReturn } as never);
     }
 
     return {
@@ -667,8 +1056,12 @@ export function createInterludeClient<TAbi extends Abi>(
     if (!signer) throw new SessionUnusableError("revokeAll needs an account to send from");
     const granter = typeof signer === "string" ? signer : signer.address;
 
+    await assertWalletChain(wallet, "revokeAll");
+    const hub = await hubAddress();
+    const epoch = await epochOf(granter);
+
     const hash = await writeContract(wallet, {
-      address: await hubAddress(),
+      address: hub,
       abi: hubAbi,
       functionName: "bumpSessionEpoch",
       account: signer,
@@ -676,7 +1069,11 @@ export function createInterludeClient<TAbi extends Abi>(
     });
 
     // The grant in storage is dead the moment this lands, and keeping it would only produce a
-    // `SessionEpochStale` on the next call.
+    // `SessionEpochStale` on the next call. Sessions already in memory stop here too: the node
+    // would still take them (see the method's comment), and this client is the one place that
+    // can refuse to.
+    const through = revokedThrough.get(granter.toLowerCase());
+    revokedThrough.set(granter.toLowerCase(), through !== undefined && through > epoch ? through : epoch);
     store.remove(storageKey(app, await baseChainId(), granter));
     return hash;
   }
@@ -689,6 +1086,7 @@ export function createInterludeClient<TAbi extends Abi>(
   ): Promise<Hex> {
     const signer = options?.account ?? wallet.account;
     if (!signer) throw new SessionUnusableError("delegating needs the app owner's account");
+    await assertWalletChain(wallet, functionName);
 
     return writeContract(wallet, {
       address: app,
@@ -701,6 +1099,31 @@ export function createInterludeClient<TAbi extends Abi>(
     } as never);
   }
 
+  // One socket per client, opened by the first watcher and closed by the last.
+  let feed: AppliedFeed | undefined;
+  const feedOf = () => (feed ??= createAppliedFeed(url));
+  const views = new Map<string, WatchedView>();
+
+  function watchRead(
+    functionName: string,
+    args: unknown,
+    onValue: (value: never) => void,
+    onError?: (error: Error) => void,
+  ): () => void {
+    const id = `${functionName}:${stableKey(args)}`;
+    let view = views.get(id);
+    if (!view) {
+      view = watchView(
+        () => readOn(node, functionName, args),
+        (trigger) => feedOf().subscribe(trigger, { fallback: trigger, fallbackMs: watchFallbackMs }),
+        watchMinInterval,
+        () => views.delete(id),
+      );
+      views.set(id, view);
+    }
+    return view.add(onValue as (value: unknown) => void, onError);
+  }
+
   return {
     app,
     abi,
@@ -711,34 +1134,237 @@ export function createInterludeClient<TAbi extends Abi>(
     hubAddress,
     epochOf,
     status: () => interludeSession(node, url),
+    waitSettled: (options) => waitSettled(node, url, options),
     commit: () => interludeCommit(node, url, config.commitToken),
-    read: (functionName, args) => readOn(node, functionName, args),
-    readSettled: (functionName, args) => readOn(base, functionName, args),
-    watch: (onCall) => watchApplied(url, onCall),
-    watchRead: (functionName, args, onValue, onError) => {
-      const pull = () => {
-        void readOn(node, functionName, args).then(onValue, (cause: unknown) => {
-          onError?.(cause instanceof Error ? cause : new Error(String(cause)));
-        });
-      };
-      pull();
-      return watchApplied(url, () => pull(), { fallback: pull, fallbackMs: 400 });
-    },
+    read: ((functionName: string, args?: unknown) => readOn(node, functionName, args)) as never,
+    readSettled: ((functionName: string, args?: unknown) =>
+      readOn(base, functionName, args)) as never,
+    watch: (onCall, options) => feedOf().subscribe(onCall, options),
+    watchRead: watchRead as never,
     openSession,
     restoreSession,
     revokeAll,
+    ensureChain,
     sessionDigest,
     sessionDigestOnChain,
     delegateAll: (wallet, options) => delegate(wallet, "delegateAll", [], options),
     delegateKey: (wallet, key, options) => delegate(wallet, "delegateKey", [key], options),
+    undelegate: async (wallet, partition = GLOBAL_PARTITION, options) => {
+      const signer = options?.account ?? wallet.account;
+      if (!signer) throw new SessionUnusableError("undelegate needs the app owner's account");
+      await assertWalletChain(wallet, "undelegate");
+      return writeContract(wallet, {
+        address: app,
+        abi: delegatableAbi,
+        functionName: "undelegate",
+        args: [partition],
+        account: signer,
+        chain: wallet.chain ?? null,
+      });
+    },
+    releaseStake: async (wallet, partition = GLOBAL_PARTITION, options) => {
+      const signer = options?.account ?? wallet.account;
+      if (!signer) throw new SessionUnusableError("releaseStake needs an account");
+      await assertWalletChain(wallet, "releaseStake");
+      return writeContract(wallet, {
+        address: await hubAddress(),
+        abi: hubAbi,
+        functionName: "releaseStake",
+        args: [app, partition],
+        account: signer,
+        chain: wallet.chain ?? null,
+      });
+    },
+  };
+}
+
+// --- watched views -------------------------------------------------------
+
+interface WatchedView {
+  add(onValue: (value: unknown) => void, onError?: (error: Error) => void): () => void;
+}
+
+/**
+ * One live view, shared by everyone watching it.
+ *
+ * The node can apply a few hundred calls a second and each one says "state moved". Reading
+ * once per call per watcher was more requests than the node would serve a page, and replies
+ * racing each other could put an older value on screen after a newer one. So: one read in
+ * flight at a time, calls arriving meanwhile collapse into a single trailing read, reads start
+ * at most every `minIntervalMs`, and every reply carries a sequence number so one that is older
+ * than what was already delivered is dropped.
+ */
+function watchView(
+  read: () => Promise<unknown>,
+  listen: (trigger: () => void) => () => void,
+  minIntervalMs: number,
+  onClose: () => void,
+): WatchedView {
+  const listeners = new Set<{ onValue: (value: unknown) => void; onError?: (error: Error) => void }>();
+  let latest: { value: unknown } | undefined;
+  let inflight = false;
+  let dirty = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let lastStart = -Infinity;
+  let issued = 0;
+  let applied = 0;
+  let retryWait = 400;
+  let stopListening: (() => void) | undefined;
+  let closed = false;
+
+  const trigger = () => {
+    if (closed) return;
+    if (inflight) {
+      dirty = true;
+      return;
+    }
+    if (timer !== undefined) return;
+    const gap = now() - lastStart;
+    if (gap >= minIntervalMs) start();
+    else timer = setTimeout(start, minIntervalMs - gap);
+  };
+
+  function start() {
+    timer = undefined;
+    if (closed) return;
+    inflight = true;
+    dirty = false;
+    lastStart = now();
+    const seq = ++issued;
+    read().then(
+      (value) => {
+        if (closed || seq <= applied) return;
+        applied = seq;
+        retryWait = 400;
+        latest = { value };
+        for (const listener of [...listeners]) listener.onValue(value);
+      },
+      (cause: unknown) => {
+        if (closed) return;
+        const error = cause instanceof Error ? cause : new Error(String(cause));
+        for (const listener of [...listeners]) listener.onError?.(error);
+        // Nothing delivered yet means the page is sitting on "loading", and waiting for the
+        // next call to land may mean waiting forever on a quiet node: retry on a backoff.
+        if (latest === undefined) {
+          dirty = false;
+          timer = setTimeout(start, retryWait);
+          retryWait = Math.min(retryWait * 2, 5000);
+        }
+      },
+    ).finally(() => {
+      inflight = false;
+      if (dirty && !closed) {
+        dirty = false;
+        trigger();
+      }
+    });
+  }
+
+  return {
+    add(onValue, onError) {
+      const listener = { onValue, ...(onError ? { onError } : {}) };
+      listeners.add(listener);
+      if (stopListening === undefined) {
+        stopListening = listen(trigger);
+        trigger();
+      } else if (latest !== undefined) {
+        const value = latest.value;
+        queueMicrotask(() => {
+          if (listeners.has(listener)) onValue(value);
+        });
+      }
+      return () => {
+        if (!listeners.delete(listener) || listeners.size > 0) return;
+        closed = true;
+        if (timer !== undefined) clearTimeout(timer);
+        stopListening?.();
+        onClose();
+      };
+    },
+  };
+}
+
+// --- helpers -------------------------------------------------------------
+
+/**
+ * A lazily computed value that is kept once it resolves, and forgotten if it rejects.
+ *
+ * Concurrent callers share the one request in flight. A rejected promise left in a `??=` cache
+ * poisons the client for the life of the page; this asks again instead.
+ */
+function remember<T>(load: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | undefined;
+  return () => {
+    pending ??= load().catch((error: unknown) => {
+      pending = undefined;
+      throw error;
+    });
+    return pending;
   };
 }
 
 function isNonceComplaint(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /nonce/i.test(message);
+  if (error instanceof NodeUnreachableError) return false;
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 8; depth++) {
+    const message = current instanceof Error ? current.message : String(current);
+    if (/nonce/i.test(message)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+function isUnknownChain(error: unknown): boolean {
+  return rpcCode(error) === 4902 || /unrecognized chain|unknown chain|4902/i.test(String(error));
+}
+
+/** The JSON-RPC code for "execution reverted" (EIP-1474 / geth), with the revert bytes as `data`. */
+const EXECUTION_REVERTED = 3;
+
+/** Revert data wherever viem put it in a failed `eth_call`. */
+function revertDataOf(error: unknown): Hex | undefined {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 8; depth++) {
+    const data = (current as { data?: unknown }).data;
+    if (typeof data === "string" && /^0x[0-9a-fA-F]*$/.test(data) && data.length >= 10) {
+      return data as Hex;
+    }
+    if (data && typeof data === "object" && typeof (data as { data?: unknown }).data === "string") {
+      return (data as { data: Hex }).data;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 function now(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+/** Args as a map key: `JSON.stringify` alone throws on the bigints an ABI call is full of. */
+function stableKey(args: unknown): string {
+  return JSON.stringify(args ?? null, (_key, value: unknown) =>
+    typeof value === "bigint" ? `${value}n` : value,
+  );
+}
+
+/** Do not poll the node unless someone actually awaits settlement. */
+function lazySettled(start: () => Promise<SettledStatus>): Promise<SettledStatus> {
+  let running: Promise<SettledStatus> | undefined;
+  const begin = () => {
+    running ??= new Promise<void>((resolve) => setTimeout(resolve, 50)).then(start);
+    return running;
+  };
+  return {
+    then(onFulfilled, onRejected) {
+      return begin().then(onFulfilled, onRejected);
+    },
+    catch(onRejected) {
+      return begin().catch(onRejected);
+    },
+    finally(onFinally) {
+      return begin().finally(onFinally);
+    },
+    [Symbol.toStringTag]: "Promise",
+  } as Promise<SettledStatus>;
 }

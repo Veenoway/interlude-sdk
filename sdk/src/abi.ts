@@ -17,12 +17,17 @@ const sessionGrantComponents = [
 ] as const;
 
 /**
- * Every named revert an app inherits from `Delegatable` and `Session`.
+ * Every named revert an app inherits: `Delegatable`'s own, and those of the libraries it builds
+ * on (`Session`, which checks a grant's signature, and `DelegatedLayout`, the write guard every
+ * `Delegated` write runs).
  *
  * Concatenated onto the app's own ABI before decoding a revert, because a hand-written ABI
  * naming only the app's functions would leave the session machinery's failures undecodable.
+ * `test/abi.test.ts` derives this list from the contracts' sources, and from their compiled
+ * artifacts when there are some, so it cannot drift from what the contracts declare.
  */
 export const delegatableErrorsAbi = [
+  // Delegatable, in the order it declares them.
   { type: "error", name: "OnlyOwner", inputs: [] },
   { type: "error", name: "OnlyHub", inputs: [] },
   { type: "error", name: "OnlyBaseChain", inputs: [] },
@@ -32,7 +37,9 @@ export const delegatableErrorsAbi = [
   { type: "error", name: "AlreadyRegistered", inputs: [] },
   { type: "error", name: "AlreadyInitialized", inputs: [] },
   { type: "error", name: "NotInitialized", inputs: [] },
-  { type: "error", name: "NotRegistered", inputs: [] },
+  { type: "error", name: "KeyIsGlobalPartition", inputs: [] },
+  { type: "error", name: "TermsRejected", inputs: [{ name: "validator", type: "address" }] },
+  { type: "error", name: "NotPendingOwner", inputs: [] },
   { type: "error", name: "MalformedSessionCall", inputs: [] },
   { type: "error", name: "PrivilegedSelector", inputs: [] },
   { type: "error", name: "SessionAlreadyOpen", inputs: [] },
@@ -45,8 +52,14 @@ export const delegatableErrorsAbi = [
   { type: "error", name: "SessionEpochStale", inputs: [] },
   { type: "error", name: "SessionNotSignedByGranter", inputs: [] },
   { type: "error", name: "NoActor", inputs: [] },
+  // Session: a grant signature it cannot accept, malformed or with a high s.
   { type: "error", name: "BadSessionSignature", inputs: [] },
   { type: "error", name: "MalleableSessionSignature", inputs: [] },
+  // DelegatedLayout: a `Delegated` write, on the base chain, to a variable the app never
+  // registered. Not in Delegatable's own ABI, since only the app's writes reach it, but in that
+  // of every app that writes one. The guard's other error, `DelegatedWritesDisabled`, is the
+  // same selector as Delegatable's, above.
+  { type: "error", name: "NotRegistered", inputs: [] },
 ] as const;
 
 export const delegatableAbi = [
@@ -137,6 +150,16 @@ export const hubAbi = [
       { name: "partition", type: "bytes32" },
     ],
     outputs: [{ type: "bool" }],
+  },
+  {
+    type: "function",
+    name: "releaseStake",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "app", type: "address" },
+      { name: "partition", type: "bytes32" },
+    ],
+    outputs: [],
   },
 ] as const;
 

@@ -10,8 +10,7 @@ import {Session} from "./libraries/Session.sol";
 
 /// @title Delegatable
 /// @notice The thin half of Interlude: inherit this in your app. All the security logic
-///         (bonds, challenges, slashing, sequencing) lives in the hub, so a fix there does
-///         not force your app to redeploy.
+///         (bonds, challenges, slashing, sequencing) lives in the hub, not here.
 /// @dev Declare delegated state with the `Delegated` types and register it in your
 ///      constructor. After that:
 ///
@@ -21,6 +20,18 @@ import {Session} from "./libraries/Session.sol";
 ///      Two things have to stay in the app, because the EVM gives no way around them: a
 ///      contract can only `sstore` its own storage, and only it can `sload` it. So the app
 ///      performs the writes and checks each diff's expected old value; the hub owns the rest.
+///
+///      **The hub is not upgradeable, and `hub` below is immutable.** Keeping the security
+///      logic in one audited contract means a bug there is fixed once, but fixing it means
+///      deploying a new hub, and an app built against the old one has to be redeployed (or,
+///      behind a proxy, upgraded to an implementation naming the new hub) to use it. There is
+///      no admin switch that repoints or pauses apps: that switch would be a key able to move
+///      every app's state.
+///
+///      **Exits keep the app locked.** After `undelegate` (or any other end of a session) the
+///      delegated state stays read-only on the base chain until the challenge window has
+///      passed and anyone calls `hub.releaseStake(app, partition)`. A fraud found in that
+///      window is rewound exactly; one found after users had already moved funds could not be.
 abstract contract Delegatable is IDelegatableApp {
     IInterludeHub public immutable hub;
 
@@ -33,6 +44,20 @@ abstract contract Delegatable is IDelegatableApp {
     error AlreadyRegistered();
     error AlreadyInitialized();
     error NotInitialized();
+    /// @dev `delegateKey(0)` would name partition zero, which is `Types.GLOBAL`: the lock of
+    ///      every global variable, not one key's.
+    error KeyIsGlobalPartition();
+    /// @dev The validator's terms, read in the same transaction the delegation opens in, fall
+    ///      outside what `_acceptTerms` allows. Same transaction, so there is no window for the
+    ///      validator to change them between the owner's look and the open.
+    error TermsRejected(address validator);
+    /// @dev Only the address named by `transferOwnership` can complete the hand-over.
+    error NotPendingOwner();
+
+    /// @dev Same shape as the ownership events tooling already indexes.
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event SlashBeneficiarySet(address indexed beneficiary);
 
     /// @dev The inner call is shorter than a selector, so it would land on the fallback and
     ///      there would be nothing for a grant's scope to name.
@@ -106,6 +131,7 @@ abstract contract Delegatable is IDelegatableApp {
         l.initialized = true;
         l.owner = owner_;
         l.baseChainId = block.chainid;
+        emit OwnershipTransferred(address(0), owner_);
     }
 
     // --- registration (constructor or initializer) -----------------------
@@ -170,38 +196,35 @@ abstract contract Delegatable is IDelegatableApp {
 
     /// @notice Hand every global variable to the validator Interlude operates.
     /// @dev Payable because a validator may charge a delegation fee; read it from
-    ///      `hub.termsOf(validator).delegationFee` and forward it.
+    ///      `hub.termsOf(validator).delegationFee` and forward it. Anything sent above the fee
+    ///      is credited to `slashBeneficiary()` in the hub (`hub.withdrawPayout()`).
     function delegateAll() external payable onlyOwner {
         DelegatedLayout.Layout storage l = DelegatedLayout.layout();
-        hub.openDelegation{value: msg.value}(
-            Types.GLOBAL, l.globalSlots, l.globalMappingBases, address(0), l.owner, l.minStake
-        );
+        _open(Types.GLOBAL, l.globalSlots, l.globalMappingBases, address(0));
     }
 
     /// @notice Hand one instance, one room or one user, to the node and leave the rest here.
     /// @dev Delegates the exact derived slots for `key`, never the whole mapping, so the
-    ///      validator gets no rights over anybody else's entry.
+    ///      validator gets no rights over anybody else's entry. Key zero is refused: it is the
+    ///      global partition's lock, not a key's.
     function delegateKey(bytes32 key) external payable onlyOwner {
-        DelegatedLayout.Layout storage l = DelegatedLayout.layout();
-        hub.openDelegation{value: msg.value}(
-            key, _slotsForKey(key), new bytes32[](0), address(0), l.owner, l.minStake
-        );
+        if (key == Types.GLOBAL) revert KeyIsGlobalPartition();
+        _open(key, _slotsForKey(key), new bytes32[](0), address(0));
     }
 
     function delegateAllTo(address validator) external payable onlyOwner {
         DelegatedLayout.Layout storage l = DelegatedLayout.layout();
-        hub.openDelegation{value: msg.value}(
-            Types.GLOBAL, l.globalSlots, l.globalMappingBases, validator, l.owner, l.minStake
-        );
+        _open(Types.GLOBAL, l.globalSlots, l.globalMappingBases, validator);
     }
 
     function delegateKeyTo(bytes32 key, address validator) external payable onlyOwner {
-        DelegatedLayout.Layout storage l = DelegatedLayout.layout();
-        hub.openDelegation{value: msg.value}(
-            key, _slotsForKey(key), new bytes32[](0), validator, l.owner, l.minStake
-        );
+        if (key == Types.GLOBAL) revert KeyIsGlobalPartition();
+        _open(key, _slotsForKey(key), new bytes32[](0), validator);
     }
 
+    /// @notice End the session. The state stays locked here until the challenge window has
+    ///         passed and `hub.releaseStake(address(this), partition)` has run; anyone may
+    ///         call that, so a user waiting to withdraw does not depend on the owner.
     function undelegate(bytes32 partition) external onlyOwner {
         hub.closeDelegation(partition);
     }
@@ -215,14 +238,100 @@ abstract contract Delegatable is IDelegatableApp {
         bytes32[] calldata mappingBases,
         address validator
     ) external payable onlyOwner {
+        _open(partition, slots, mappingBases, validator);
+    }
+
+    /// @dev Every delegation goes through here, so every one checks the terms it is about to
+    ///      be held to in the same transaction that opens it. A validator that rewrote its
+    ///      terms between the owner reading them and this call gets refused here rather than
+    ///      silently accepted.
+    function _open(
+        bytes32 partition,
+        bytes32[] memory slots,
+        bytes32[] memory mappingBases,
+        address validator
+    ) private {
+        address v = validator == address(0) ? hub.defaultValidator() : validator;
+        if (v != address(0)) {
+            Types.Terms memory t = hub.termsOf(v);
+            // A validator that never published terms is the hub's to refuse, with its own
+            // error; there is nothing here to judge.
+            if (t.resolver != address(0) && !_acceptTerms(t)) revert TermsRejected(v);
+        }
         hub.openDelegation{value: msg.value}(
             partition,
             slots,
             mappingBases,
             validator,
-            DelegatedLayout.layout().owner,
+            slashBeneficiary(),
             DelegatedLayout.layout().minStake
         );
+    }
+
+    /// @notice Whether this app will be held to `t`. Override to demand more (or less) than
+    ///         the defaults, and call `super` to keep them.
+    /// @dev The hub already bounds every term to protocol limits (a bond that is neither zero
+    ///      nor ten times the stake, windows that can neither lapse at once nor overflow).
+    ///      These defaults are the app's side of the bargain, set where the protocol floor is
+    ///      too thin for state worth protecting:
+    ///
+    ///        - `challengeWindow` of at least an hour: this is how long a watcher has, after
+    ///          the session ends, to find fraud before the stake walks;
+    ///        - `resolutionWindow` of at least fifteen minutes: every dispute move runs on it,
+    ///          and a watcher that cannot answer in time loses a dispute it was right about.
+    ///
+    ///      `stakePerDelegation` is not here: `_requireStake` states that floor and the hub
+    ///      enforces it. Neither is the fee, which is bounded by what the owner sends.
+    function _acceptTerms(Types.Terms memory t) internal view virtual returns (bool) {
+        return t.challengeWindow >= ACCEPT_MIN_CHALLENGE_WINDOW
+            && t.resolutionWindow >= ACCEPT_MIN_RESOLUTION_WINDOW;
+    }
+
+    uint64 private constant ACCEPT_MIN_CHALLENGE_WINDOW = 1 hours;
+    uint64 private constant ACCEPT_MIN_RESOLUTION_WINDOW = 15 minutes;
+
+    // --- ownership --------------------------------------------------------
+
+    /// @notice Name a new owner. Nothing changes until that address calls `acceptOwnership`,
+    ///         so a typo cannot hand the app to nobody. Zero cancels a pending hand-over.
+    /// @dev Two steps because the owner is the delegation's only controller: it alone can
+    ///      `undelegate`, and an app deployed through a factory or a CI key needs a way to end
+    ///      up owned by the team that runs it.
+    function transferOwnership(address newOwner) external onlyOwner {
+        DelegatedLayout.Layout storage l = DelegatedLayout.layout();
+        l.pendingOwner = newOwner;
+        emit OwnershipTransferStarted(l.owner, newOwner);
+    }
+
+    function acceptOwnership() external {
+        DelegatedLayout.Layout storage l = DelegatedLayout.layout();
+        if (msg.sender != l.pendingOwner || msg.sender == address(0)) revert NotPendingOwner();
+        address previous = l.owner;
+        l.owner = msg.sender;
+        l.pendingOwner = address(0);
+        emit OwnershipTransferred(previous, msg.sender);
+    }
+
+    function pendingOwner() public view returns (address) {
+        return DelegatedLayout.layout().pendingOwner;
+    }
+
+    /// @notice Who receives the app's half of a slashed stake (and any fee overpayment).
+    ///         The owner unless set otherwise.
+    /// @dev Read when a delegation opens and frozen into it, so changing it does not reach a
+    ///      live session. Worth setting when the owner is an operator key rather than the
+    ///      people the app's users trust: the owner of an app deployed for you may be the very
+    ///      party a slash is punishing.
+    function slashBeneficiary() public view returns (address) {
+        DelegatedLayout.Layout storage l = DelegatedLayout.layout();
+        address b = l.slashBeneficiary;
+        return b == address(0) ? l.owner : b;
+    }
+
+    /// @param beneficiary zero to go back to the owner
+    function setSlashBeneficiary(address beneficiary) external onlyOwner {
+        DelegatedLayout.layout().slashBeneficiary = beneficiary;
+        emit SlashBeneficiarySet(slashBeneficiary());
     }
 
     function _slotsForKey(bytes32 key) private view returns (bytes32[] memory slots) {
@@ -255,6 +364,14 @@ abstract contract Delegatable is IDelegatableApp {
     }
 
     /// @inheritdoc IDelegatableApp
+    function syncDelegatedSlot(bytes32 slot, bytes32 value) external onlyHub {
+        if (DelegatedLayout.isReserved(slot)) revert ReservedSlot();
+        assembly {
+            sstore(slot, value)
+        }
+    }
+
+    /// @inheritdoc IDelegatableApp
     function onDelegationChanged(bytes32 partition, bool delegated) external onlyHub {
         DelegatedLayout.layout().locked[partition] = delegated;
     }
@@ -269,7 +386,22 @@ abstract contract Delegatable is IDelegatableApp {
     uint256 private constant SESSION_WILDCARD = 1 << 192;
 
     /// @notice Run `call` on this contract as `g.granter`, on the authority of `g` and `sig`.
-    /// @dev The point of the wrapper is that it changes nothing about the app's ABI. The
+    /// @dev **Inside the wrapped call `msg.sender` is the app itself, not the user.** The call
+    ///      is a self-call (`address(this).call`), so any function that trusts `msg.sender` —
+    ///      an inherited ERC-20 `transfer`, an `onlyOwner` on an app that owns itself — acts
+    ///      with the app's own authority, on the app's own balances. Anyone can sign an
+    ///      `anyFunction` grant naming themselves as granter, so that authority is anyone's.
+    ///      Read the caller with `_actor()`, never `msg.sender`, in anything a session can
+    ///      reach, and keep everything else behind `_isSessionBlocked`. Its defaults refuse
+    ///      the delegation and ownership controls, the standard token-moving selectors
+    ///      (ERC-20/721/1155, and the ERC-1363, ERC-777, ERC-4626 and burn extensions) and
+    ///      the common self-`delegatecall` batchers (`multicall`). They are a list of known
+    ///      names, not a proof: only the outer selector is checked, so **any function that
+    ///      forwards caller-supplied calldata to `this` — by `call` or `delegatecall` — or
+    ///      spends the app's own balance under a name not on that list must be added to it**
+    ///      by the app, or the grant reaches whatever that function can reach.
+    ///
+    ///      The point of the wrapper is that it changes nothing about the app's ABI. The
     ///      developer's functions keep their signatures, their selectors and their existing
     ///      callers; the only edit inside them is `_actor()` where `msg.sender` used to be.
     ///      A direct call with no grant still works, because `_actor()` falls back to
@@ -368,17 +500,129 @@ abstract contract Delegatable is IDelegatableApp {
     ///      with the game. A grant should never be able to reach the machinery that decides
     ///      what a grant is worth.
     ///
+    ///      The same self-call is why the standard token and ownership selectors are refused
+    ///      too. An app that inherits an ERC-20, ERC-721 or ERC-1155 and holds its own tokens
+    ///      would otherwise hand them to whoever signs a grant for `transfer`, `approve` or
+    ///      `setApprovalForAll`, because inside the call `msg.sender` is the app. Refusing
+    ///      them costs an app nothing: a session is for the app's own game functions, written
+    ///      against `_actor()`, never for the token plumbing.
+    ///
+    ///      The token list covers the extensions that move or destroy the caller's balance
+    ///      under another name: ERC-1363 `transferAndCall` / `transferFromAndCall` /
+    ///      `approveAndCall`, ERC-20/721 `burn` / `burnFrom`, ERC-4626 `deposit` / `mint` /
+    ///      `withdraw` / `redeem` (which spend or pay out the app's shares and assets), and
+    ///      ERC-777 `send` / `operatorSend` / `burn` / `operatorBurn` / `authorizeOperator`.
+    ///
+    ///      Batchers are refused for a different reason: only the outer selector is checked
+    ///      here. OpenZeppelin's `Multicall` (and Uniswap's deadline and block-hash variants)
+    ///      `delegatecall`s `this` with each entry, and a `delegatecall` keeps `msg.sender`, so
+    ///      `multicall([transfer(thief, all)])` would run `transfer` as the app while the
+    ///      wrapper only ever saw `multicall`. Any other function of the app that forwards
+    ///      caller-supplied calldata to itself has the same shape and must be added by the
+    ///      app; a name this list does not know is a name it cannot refuse.
+    ///
     ///      Override to add your own privileged functions, and return `super` so these stay
     ///      covered. The scope is the user's fence; this is the app's.
     function _isSessionBlocked(bytes4 selector) internal view virtual returns (bool) {
+        return _isDelegationControl(selector) || _isOwnershipControl(selector)
+            || _isTokenMovement(selector) || _isTokenExtension(selector) || _isSelfBatcher(selector);
+    }
+
+    function _isDelegationControl(bytes4 selector) private pure returns (bool) {
         return selector == this.withSession.selector
             || selector == this.applyDelegatedDiffs.selector
             || selector == this.revertDelegatedDiffs.selector
+            || selector == this.syncDelegatedSlot.selector
             || selector == this.onDelegationChanged.selector
             || selector == this.delegateAll.selector || selector == this.delegateKey.selector
             || selector == this.delegateAllTo.selector || selector == this.delegateKeyTo.selector
             || selector == this.undelegate.selector || selector == this.delegateRaw.selector;
     }
+
+    function _isOwnershipControl(bytes4 selector) private pure returns (bool) {
+        return selector == this.transferOwnership.selector
+            || selector == this.acceptOwnership.selector
+            || selector == this.setSlashBeneficiary.selector || selector == RENOUNCE_OWNERSHIP;
+    }
+
+    /// @dev ERC-20 and ERC-721 share `transferFrom` and `approve`, so one entry covers both.
+    function _isTokenMovement(bytes4 selector) private pure returns (bool) {
+        return selector == TRANSFER || selector == TRANSFER_FROM || selector == APPROVE
+            || selector == INCREASE_ALLOWANCE || selector == DECREASE_ALLOWANCE
+            || selector == PERMIT || selector == SET_APPROVAL_FOR_ALL
+            || selector == SAFE_TRANSFER_FROM || selector == SAFE_TRANSFER_FROM_WITH_DATA
+            || selector == SAFE_TRANSFER_FROM_1155 || selector == SAFE_BATCH_TRANSFER_FROM_1155;
+    }
+
+    bytes4 private constant TRANSFER = bytes4(keccak256("transfer(address,uint256)"));
+    bytes4 private constant TRANSFER_FROM =
+        bytes4(keccak256("transferFrom(address,address,uint256)"));
+    bytes4 private constant APPROVE = bytes4(keccak256("approve(address,uint256)"));
+    bytes4 private constant INCREASE_ALLOWANCE =
+        bytes4(keccak256("increaseAllowance(address,uint256)"));
+    bytes4 private constant DECREASE_ALLOWANCE =
+        bytes4(keccak256("decreaseAllowance(address,uint256)"));
+    bytes4 private constant PERMIT =
+        bytes4(keccak256("permit(address,address,uint256,uint256,uint8,bytes32,bytes32)"));
+    bytes4 private constant SET_APPROVAL_FOR_ALL =
+        bytes4(keccak256("setApprovalForAll(address,bool)"));
+    bytes4 private constant SAFE_TRANSFER_FROM =
+        bytes4(keccak256("safeTransferFrom(address,address,uint256)"));
+    bytes4 private constant SAFE_TRANSFER_FROM_WITH_DATA =
+        bytes4(keccak256("safeTransferFrom(address,address,uint256,bytes)"));
+    bytes4 private constant SAFE_TRANSFER_FROM_1155 =
+        bytes4(keccak256("safeTransferFrom(address,address,uint256,uint256,bytes)"));
+    bytes4 private constant SAFE_BATCH_TRANSFER_FROM_1155 =
+        bytes4(keccak256("safeBatchTransferFrom(address,address,uint256[],uint256[],bytes)"));
+    bytes4 private constant RENOUNCE_OWNERSHIP = bytes4(keccak256("renounceOwnership()"));
+
+    /// @dev ERC-1363, burnable, ERC-4626 and ERC-777: each of these moves, spends or destroys
+    ///      the calling account's tokens, and inside a session the calling account is the app.
+    function _isTokenExtension(bytes4 selector) private pure returns (bool) {
+        return selector == TRANSFER_AND_CALL || selector == TRANSFER_AND_CALL_WITH_DATA
+            || selector == TRANSFER_FROM_AND_CALL || selector == TRANSFER_FROM_AND_CALL_WITH_DATA
+            || selector == APPROVE_AND_CALL || selector == APPROVE_AND_CALL_WITH_DATA
+            || selector == BURN || selector == BURN_FROM || selector == VAULT_DEPOSIT
+            || selector == VAULT_MINT || selector == VAULT_WITHDRAW || selector == VAULT_REDEEM
+            || selector == SEND_777 || selector == OPERATOR_SEND_777 || selector == BURN_777
+            || selector == OPERATOR_BURN_777 || selector == AUTHORIZE_OPERATOR_777;
+    }
+
+    /// @dev Functions that run caller-supplied calldata against `this`. See `_isSessionBlocked`.
+    function _isSelfBatcher(bytes4 selector) private pure returns (bool) {
+        return
+            selector == MULTICALL || selector == MULTICALL_DEADLINE
+                || selector == MULTICALL_BLOCKHASH;
+    }
+
+    bytes4 private constant TRANSFER_AND_CALL =
+        bytes4(keccak256("transferAndCall(address,uint256)"));
+    bytes4 private constant TRANSFER_AND_CALL_WITH_DATA =
+        bytes4(keccak256("transferAndCall(address,uint256,bytes)"));
+    bytes4 private constant TRANSFER_FROM_AND_CALL =
+        bytes4(keccak256("transferFromAndCall(address,address,uint256)"));
+    bytes4 private constant TRANSFER_FROM_AND_CALL_WITH_DATA =
+        bytes4(keccak256("transferFromAndCall(address,address,uint256,bytes)"));
+    bytes4 private constant APPROVE_AND_CALL = bytes4(keccak256("approveAndCall(address,uint256)"));
+    bytes4 private constant APPROVE_AND_CALL_WITH_DATA =
+        bytes4(keccak256("approveAndCall(address,uint256,bytes)"));
+    bytes4 private constant BURN = bytes4(keccak256("burn(uint256)"));
+    bytes4 private constant BURN_FROM = bytes4(keccak256("burnFrom(address,uint256)"));
+    bytes4 private constant VAULT_DEPOSIT = bytes4(keccak256("deposit(uint256,address)"));
+    bytes4 private constant VAULT_MINT = bytes4(keccak256("mint(uint256,address)"));
+    bytes4 private constant VAULT_WITHDRAW = bytes4(keccak256("withdraw(uint256,address,address)"));
+    bytes4 private constant VAULT_REDEEM = bytes4(keccak256("redeem(uint256,address,address)"));
+    bytes4 private constant SEND_777 = bytes4(keccak256("send(address,uint256,bytes)"));
+    bytes4 private constant OPERATOR_SEND_777 =
+        bytes4(keccak256("operatorSend(address,address,uint256,bytes,bytes)"));
+    bytes4 private constant BURN_777 = bytes4(keccak256("burn(uint256,bytes)"));
+    bytes4 private constant OPERATOR_BURN_777 =
+        bytes4(keccak256("operatorBurn(address,uint256,bytes,bytes)"));
+    bytes4 private constant AUTHORIZE_OPERATOR_777 =
+        bytes4(keccak256("authorizeOperator(address)"));
+    bytes4 private constant MULTICALL = bytes4(keccak256("multicall(bytes[])"));
+    bytes4 private constant MULTICALL_DEADLINE = bytes4(keccak256("multicall(uint256,bytes[])"));
+    bytes4 private constant MULTICALL_BLOCKHASH = bytes4(keccak256("multicall(bytes32,bytes[])"));
 
     /// @notice The digest a granter signs. Exposed so a frontend can check its own EIP-712
     ///         encoding against the contract's rather than discovering a mismatch as a revert.
@@ -503,12 +747,11 @@ abstract contract Delegatable is IDelegatableApp {
         bytes32 slot = d.slot;
         if (DelegatedLayout.isReserved(slot)) revert ReservedSlot();
 
-        bytes32 current;
-        assembly {
-            current := sload(slot)
-        }
-        if (current != d.newValue) revert OldValueMismatch();
-
+        // The hub already authenticated this list against the fold it stored at commit, and
+        // the partition has been locked since the session opened, so nothing but the hub's
+        // own commits can have moved this slot. Written unconditionally all the same: a
+        // confirmed slash has to land, and an extra `current == newValue` check is one more
+        // way for it not to. Apply still checks `oldValue`: a bad commit must not land.
         bytes32 oldValue = d.oldValue;
         assembly {
             sstore(slot, oldValue)

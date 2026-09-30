@@ -62,6 +62,14 @@ export interface AppConfig {
    */
   delegate: "all" | `0x${string}`;
   setup: SetupCall[];
+  /**
+   * Who should own the app after `ship`. The hosted deployer offers it ownership once the
+   * delegation is open, and this address takes it with `acceptOwnership()`. Unset, the owner
+   * stays Interlude's deploy key. `dev` ignores it: locally the anvil admin is the owner. Only
+   * its shape is checked here; whether one of anvil's accounts may own the app depends on the
+   * control plane `ship` talks to, which this file does not know (see `refuseWellKnownOwner`).
+   */
+  owner?: `0x${string}`;
 }
 
 export interface ChainConfig {
@@ -185,6 +193,7 @@ export function parseConfig(source: string, path: string): Config {
       args: stringList(app, "args", "app", path),
       delegate: delegateTarget(app, path),
       setup: setupCalls(raw, path),
+      owner: ownerAddress(app, path),
     },
     chain: {
       port: number(table(raw, "chain", path), "port", DEFAULTS.chain.port, "chain", path),
@@ -236,6 +245,81 @@ function delegateTarget(app: Record<string, unknown>, path: string): "all" | `0x
   throw new ConfigError(
     `${path}: [app] delegate = "${value}" is neither "all" nor a 32-byte key. ` +
       `"all" hands over the whole contract; a key hands over that one partition.`,
+  );
+}
+
+function ownerAddress(app: Record<string, unknown>, path: string): `0x${string}` | undefined {
+  const value = optionalString(app, "owner", "app", path);
+  if (value === undefined) return undefined;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(value)) {
+    throw new ConfigError(
+      `${path}: [app] owner = "${value}" is not an address. It names the wallet that will own ` +
+        `the app after ship: owner = "0xYourWallet", with your own wallet's address.`,
+    );
+  }
+  // Only the shape is refused here. `dev` and `abi` parse this same file and never use the
+  // owner, so refusing anvil's accounts at parse time stopped them for a line they ignore.
+  return value as `0x${string}`;
+}
+
+/**
+ * anvil's ten default accounts, from the mnemonic "test test test test test test test test test
+ * test test junk" that Hardhat starts with too. Lower-case, so a lookup does not care how an
+ * address was checksummed. `scripts/lib/guard.sh` in the Interlude repository keeps the same list.
+ */
+export const WELL_KNOWN_DEV_ACCOUNTS: readonly `0x${string}`[] = [
+  "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+  "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+  "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
+  "0x15d34aaf54267db7d7c367839aaf71a00a2c6a65",
+  "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc",
+  "0x976ea74026e726554db657fa54763abd0c3a0aa9",
+  "0x14dc79964da2c08b23698b3d3cc7ca32193d9955",
+  "0x23618e81e3f5cdf7f54c3d65f7fbc0abf5b21e8f",
+  "0xa0ee7a142d267c1f36714e4a8f75612f20a79720",
+];
+
+/** Which of anvil's default accounts `address` is, or `undefined` for any other address. */
+export function wellKnownDevAccount(address: string): number | undefined {
+  const index = WELL_KNOWN_DEV_ACCOUNTS.indexOf(address.toLowerCase() as `0x${string}`);
+  return index < 0 ? undefined : index;
+}
+
+/** Whether a URL names this machine, the only place a dev account owning an app is harmless. */
+export function isLoopbackUrl(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "[::1]" ||
+    /^127(\.\d{1,3}){3}$/.test(host)
+  );
+}
+
+/**
+ * Refuse one of anvil's default accounts as the owner of an app that lives on a shared chain.
+ *
+ * Their private keys are printed in anvil's banner and in every Foundry tutorial. Ownership on the
+ * hosted path is offered, then taken with `acceptOwnership()`, so naming such an address hands
+ * the app to whoever calls that first: anybody. The CLI's own README and this file's error
+ * message used to suggest anvil's account #3 as the owner, which is how one ends up there.
+ * `control`, when given, is the control plane `ship` talks to; a loopback one deploys on a local
+ * chain, where these accounts are the point.
+ */
+export function refuseWellKnownOwner(owner: string, where: string, control?: string): void {
+  const index = wellKnownDevAccount(owner);
+  if (index === undefined) return;
+  if (control !== undefined && isLoopbackUrl(control)) return;
+  throw new ConfigError(
+    `${where} ${owner} is anvil's default account #${index}. Its private key is public, so ` +
+      `anyone could accept the ownership ship offers it, then undelegate the app, re-seed it and ` +
+      `receive its slash payouts. Use your own wallet's address.`,
   );
 }
 

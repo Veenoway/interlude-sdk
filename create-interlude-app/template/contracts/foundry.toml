@@ -1,0 +1,15 @@
+# Interlude's contracts use transient storage (tstore), so the compiler has to be solc 0.8.28 or
+# later and the EVM Cancun or later. Monad runs past both; lowering either breaks the build
+# inside lib/interlude with an error that never mentions this file.
+[profile.default]
+src = "src"
+out = "out"
+test = "test"
+libs = ["lib"]
+solc = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+
+[fmt]
+line_length = 100

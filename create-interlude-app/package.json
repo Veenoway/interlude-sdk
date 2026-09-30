@@ -1,0 +1,48 @@
+{
+  "name": "create-interlude-app",
+  "version": "0.1.1",
+  "description": "Scaffold a Foundry + Next.js project whose contract runs on an Interlude node: one wallet signature, then gasless sub-millisecond calls that settle on Monad.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Veenoway/interlude-sdk.git",
+    "directory": "create-interlude-app"
+  },
+  "homepage": "https://github.com/Veenoway/interlude-sdk#readme",
+  "bugs": "https://github.com/Veenoway/interlude-sdk/issues",
+  "keywords": [
+    "monad",
+    "interlude",
+    "foundry",
+    "nextjs",
+    "scaffold",
+    "create-app",
+    "session-keys"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20.9"
+  },
+  "bin": {
+    "create-interlude-app": "./bin/create-interlude-app.js"
+  },
+  "exports": {
+    ".": "./src/scaffold.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "template",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "sync-template": "node scripts/sync-template.mjs"
+  },
+  "devDependencies": {
+    "vitest": "^3"
+  }
+}

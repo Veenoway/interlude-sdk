@@ -1,6 +1,15 @@
+import { mnemonicToAccount } from "viem/accounts";
 import { describe, expect, it } from "vitest";
-import { ConfigError, parseConfig, substitute } from "../src/config.js";
-import { starterConfig } from "../src/starter.js";
+import {
+  ConfigError,
+  WELL_KNOWN_DEV_ACCOUNTS,
+  isLoopbackUrl,
+  parseConfig,
+  refuseWellKnownOwner,
+  substitute,
+  wellKnownDevAccount,
+} from "../src/config.js";
+import { firstHour, hubArgumentIndex, starterConfig } from "../src/starter.js";
 
 const AT = "interlude.toml";
 
@@ -102,12 +111,156 @@ describe("the file init writes", () => {
 
     const config = parseConfig(generated, AT);
     expect(config.app.contract).toBe("Chips");
-    expect(config.app.args).toEqual(["$HUB", "0"]);
+    expect(config.app.args).toEqual(["$HUB", "<fill in: uint256 stakeFloor>"]);
     expect(config.node.chainId).toBe(4242);
   });
 
   it("parses for a constructor that takes nothing at all", () => {
     const config = parseConfig(starterConfig("Bare", "src/Bare.sol", []), AT);
     expect(config.app.args).toEqual([]);
+  });
+
+  /**
+   * `init` used to write "0" for every argument it could not know, and "$HUB" for every address.
+   * A zero stake and a second hub address both deploy without complaint and are both wrong, so
+   * what it cannot know is now left visibly unfinished — and dev and ship refuse it by name.
+   */
+  it("never writes a value it had to guess", () => {
+    const generated = starterConfig("Market", "src/Market.sol", [
+      { type: "address", name: "treasury", internalType: "address" },
+      { type: "address", name: "h", internalType: "contract IInterludeHub" },
+      { type: "uint256", name: "fee", internalType: "uint256" },
+    ]);
+    expect(parseConfig(generated, AT).app.args).toEqual([
+      "<fill in: address treasury>",
+      "$HUB",
+      "<fill in: uint256 fee>",
+    ]);
+  });
+
+  it("names the hub by parameter name when the type does not say", () => {
+    expect(hubArgumentIndex([{ type: "uint256" }, { type: "address", name: "hub_" }])).toBe(1);
+    expect(hubArgumentIndex([{ type: "address", name: "a" }, { type: "address", name: "b" }])).toBe(
+      -1,
+    );
+    expect(hubArgumentIndex([{ type: "uint256" }, { type: "address", name: "x" }])).toBe(1);
+  });
+
+  it("says in the file that a per-key contract is for dev, not ship", () => {
+    const generated = starterConfig("Rooms", "src/Rooms.sol", [{ type: "address", name: "hub_" }], {
+      perKey: true,
+    });
+    expect(generated).toMatch(/cannot — the hosted node serves the whole\n# contract \(GLOBAL\) only/);
+    expect(parseConfig(generated, AT).app.args).toEqual(["$HUB"]);
+  });
+});
+
+describe("owner under [app]", () => {
+  const MINE = "0x25912EA7D8B2B27cfE46b8F2BB197741a72B9802";
+  const ANVIL_3 = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
+  const withOwner = (owner: string) =>
+    `[app]\ncontract = "C"\nargs = ["$HUB"]\nowner = "${owner}"\n`;
+
+  it("is read, for ship", () => {
+    expect(parseConfig(withOwner(MINE), AT).app.owner).toBe(MINE);
+  });
+
+  it("is refused when it is not an address, naming a placeholder, not somebody's account", () => {
+    const message = refusal(() => parseConfig(withOwner("me"), AT));
+    expect(message).toMatch(/owner = "me" is not an address/);
+    // It used to suggest anvil's account #3, whose key is public: copied as is, that address
+    // would have been offered the app on Monad testnet.
+    expect(message).toMatch(/owner = "0xYourWallet"/);
+    expect(message).not.toMatch(/0x90F79bf6/i);
+  });
+
+  it("is read even when it is one of anvil's accounts: dev and abi parse this file too", () => {
+    // Refusing it here stopped `interlude dev` and `interlude abi`, which never use the owner,
+    // for a line the 0.2.0 README told people to write. Whether it may own the app depends on
+    // the control plane ship talks to, which this file does not name.
+    expect(parseConfig(withOwner(ANVIL_3), AT).app.owner).toBe(ANVIL_3);
+  });
+});
+
+describe("anvil's well-known accounts", () => {
+  const ANVIL_3 = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
+  const MINE = "0x25912EA7D8B2B27cfE46b8F2BB197741a72B9802";
+  const PUBLIC_CONTROL = "https://control.interludelayer.xyz";
+
+  it("are the ten the test mnemonic derives", () => {
+    const mnemonic = "test test test test test test test test test test test junk";
+    const derived = Array.from({ length: 10 }, (_, addressIndex) =>
+      mnemonicToAccount(mnemonic, { addressIndex }).address.toLowerCase(),
+    );
+    expect([...WELL_KNOWN_DEV_ACCOUNTS]).toEqual(derived);
+    expect(wellKnownDevAccount(ANVIL_3)).toBe(3);
+    expect(wellKnownDevAccount(MINE)).toBeUndefined();
+  });
+
+  it("may not own an app behind the public control plane, or behind one ship cannot place", () => {
+    expect(() => refuseWellKnownOwner(ANVIL_3, "--owner")).toThrow(`--owner ${ANVIL_3} is anvil's`);
+    expect(() => refuseWellKnownOwner(ANVIL_3, "--owner", PUBLIC_CONTROL)).toThrow(ConfigError);
+    expect(() => refuseWellKnownOwner(ANVIL_3, "--owner", "http://10.0.0.5:8080")).toThrow(
+      ConfigError,
+    );
+  });
+
+  it("are recognised however they are checksummed, and named by their index", () => {
+    for (const [index, account] of WELL_KNOWN_DEV_ACCOUNTS.entries()) {
+      for (const spelled of [account, `0x${account.slice(2).toUpperCase()}`]) {
+        const refuse = () => refuseWellKnownOwner(spelled, "[app] owner", PUBLIC_CONTROL);
+        expect(refuse).toThrow(ConfigError);
+        expect(refuse).toThrow(`anvil's default account #${index}. Its private key is public`);
+      }
+    }
+  });
+
+  it("may own one on a control plane on this machine, where the chain is a local one", () => {
+    const local = [
+      "http://127.0.0.1:8080",
+      "http://localhost:3000",
+      "http://[::1]:9",
+      "http://app.localhost",
+    ];
+    for (const control of local) {
+      expect(() => refuseWellKnownOwner(ANVIL_3, "--owner", control), control).not.toThrow();
+    }
+  });
+
+  it("does not mistake a lookalike host for this machine", () => {
+    expect(isLoopbackUrl("http://127.0.0.1.example.com")).toBe(false);
+    expect(isLoopbackUrl("http://localhost.example.com")).toBe(false);
+    expect(isLoopbackUrl("not a url")).toBe(false);
+    expect(isLoopbackUrl("http://127.0.0.1:8080/")).toBe(true);
+  });
+
+  it("leaves every other owner alone, wherever it ships", () => {
+    expect(() => refuseWellKnownOwner(MINE, "--owner")).not.toThrow();
+    expect(() => refuseWellKnownOwner(MINE, "--owner", PUBLIC_CONTROL)).not.toThrow();
+  });
+});
+
+/** The message a call throws, so several things can be said about one refusal. */
+function refusal(call: () => unknown): string {
+  try {
+    call();
+  } catch (error) {
+    return (error as Error).message;
+  }
+  throw new Error("expected a refusal, and nothing was thrown");
+}
+
+describe("the starter contract init prints", () => {
+  it("asks for the compiler the vendored sources need", () => {
+    const text = firstHour("src");
+    expect(text).toContain("pragma solidity ^0.8.28;");
+    expect(text).not.toContain("0.8.24");
+    expect(text).toMatch(/cancun/);
+    expect(text).toMatch(/a fresh `forge init` Counter does not/);
+  });
+
+  it("does not claim a remapping it failed to write", () => {
+    expect(firstHour("src", false)).toMatch(/could not be written/);
+    expect(firstHour("src", false)).not.toMatch(/The remapping is written/);
   });
 });

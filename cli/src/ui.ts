@@ -1,3 +1,5 @@
+import { createInterface } from "node:readline/promises";
+
 /**
  * Terminal output, kept deliberately plain.
  *
@@ -48,6 +50,19 @@ export function fail(message: string): never {
   process.stderr.write(`\n${red("error")} ${message}\n`);
   process.exitCode = 1;
   throw new Bail();
+}
+
+/** Prompt on a TTY. Scripts and CI keep `fallback`. */
+export async function ask(question: string, fallback = ""): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return fallback;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const hint = fallback ? ` [${fallback}]` : "";
+    const answer = await rl.question(`${question}${hint}: `);
+    return answer.trim() || fallback;
+  } finally {
+    rl.close();
+  }
 }
 
 /** Thrown by `fail` so the top level can exit without printing a stack over the message. */

@@ -8,6 +8,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { connect, createServer } from "node:net";
 import { delimiter, join } from "node:path";
 import { ArtifactError, run } from "./artifacts.js";
 
@@ -64,6 +65,10 @@ export async function startAnvil(options: AnvilOptions): Promise<Managed> {
       String(options.port),
       "--block-time",
       String(options.blockTime),
+      // The hub's runtime code is over EIP-170's 24 KB. Monad's limit is 128 KB, so the hub
+      // deploys there; a stock anvil refuses it, and `dev` died at "deploying the hub" with a
+      // revert that never mentioned size. This makes the local chain match the real one.
+      "--disable-code-size-limit",
       "--silent",
     ],
     process.cwd(),
@@ -85,12 +90,12 @@ export interface NodeOptions {
   commitInterval: number;
   dataDir: string;
   logDir: string;
-  /** Where to look for a built node, when one is not already on PATH. */
-  checkout: string;
+  /** Found by `findNodeBinary` before anything was deployed — see `dev`'s preflight. */
+  binary: string;
 }
 
 export async function startNode(options: NodeOptions): Promise<Managed> {
-  const binary = await findNodeBinary(options.checkout);
+  const binary = options.binary;
   const env: Record<string, string> = {
     INTERLUDE_BASE_RPC: options.baseRpc,
     INTERLUDE_HUB: options.hub,
@@ -153,6 +158,78 @@ export async function findNodeBinary(checkout: string): Promise<string> {
       `or run \`interlude ship\` instead: we deploy the bytecode and run the node. ` +
       `You do not need the binary.`,
   );
+}
+
+/**
+ * Everything `dev` can find out is missing before it has started or deployed anything.
+ *
+ * The node binary used to be looked for last — after compiling, starting anvil and deploying the
+ * hub and the app — so a machine without one spent a minute building a stack and then threw it
+ * away. Same for a port somebody else holds: a stale anvil there *answers*, and the command
+ * would have deployed onto it. Both are cheap to ask about first. Returns the node binary.
+ */
+export async function devPreflight(
+  ports: { chain: number; node: number },
+  checkout: string,
+): Promise<string> {
+  if (ports.chain === ports.node) {
+    throw new ArtifactError(
+      `[chain] port and [node] port are both ${ports.chain}. They have to differ.`,
+    );
+  }
+  await assertPortFree(ports.chain, "the base chain", "[chain] port");
+  await assertPortFree(ports.node, "the node", "[node] port");
+  return findNodeBinary(checkout);
+}
+
+/**
+ * Refuse a port something else already holds, before starting anything.
+ *
+ * anvil on a taken port exits with a bind error in its log, but a stale anvil from an earlier
+ * run is worse: it *answers*, so this command would deploy onto yesterday's chain and point a
+ * node at it, and the first sign of trouble would be much further on. `scripts/sdk-e2e.sh` has
+ * checked this for a long time; `dev` now does the same.
+ */
+export async function assertPortFree(port: number, what: string, setting: string): Promise<void> {
+  let taken = await new Promise<NodeJS.ErrnoException | undefined>((resolvePort) => {
+    const server = createServer();
+    server.once("error", (error: NodeJS.ErrnoException) => resolvePort(error));
+    server.listen({ port, host: "127.0.0.1", exclusive: true }, () => {
+      server.close(() => resolvePort(undefined));
+    });
+  });
+  // Binding 127.0.0.1 succeeds next to a listener on `::1` (what `localhost` is on macOS), and
+  // on some systems next to one on 0.0.0.0 or `::`. What matters is whether something answers
+  // where anvil and the node will be asked, so ask.
+  if (!taken && (await answers(port))) {
+    taken = Object.assign(new Error(`something already answers on port ${port}`), { code: "EADDRINUSE" });
+  }
+  if (!taken) return;
+  throw new ArtifactError(
+    taken.code === "EADDRINUSE"
+      ? `port ${port}, where ${what} would listen, is already taken — often an anvil or a node ` +
+          `left over from an earlier run (\`lsof -i :${port}\` names it). Stop it, or set ` +
+          `${setting} in interlude.toml.`
+      : `cannot listen on port ${port} for ${what}: ${taken.message}. Set ${setting} in interlude.toml.`,
+  );
+}
+
+/** Does anything accept a connection on this port, over IPv4 or IPv6 loopback? */
+async function answers(port: number): Promise<boolean> {
+  for (const host of ["127.0.0.1", "::1"]) {
+    const connected = await new Promise<boolean>((resolveProbe) => {
+      const socket = connect({ port, host });
+      const done = (result: boolean) => {
+        socket.destroy();
+        resolveProbe(result);
+      };
+      socket.setTimeout(500, () => done(false));
+      socket.once("connect", () => done(true));
+      socket.once("error", () => done(false));
+    });
+    if (connected) return true;
+  }
+  return false;
 }
 
 function binaryOnPath(name: string): string | undefined {

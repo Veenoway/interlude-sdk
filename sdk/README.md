@@ -1,27 +1,61 @@
 # @interludelayer-sdk/sdk
 
-Open a session and send gasless, sub-millisecond transactions to an Interlude node.
+Open a session and send gasless transactions to an Interlude node: about 3 ms next to the node,
+~40 ms round trip over the network.
 
 One wallet signature buys a session key. Every call after that is signed by the key, costs no
 gas, and comes back in a single round trip with its return value already decoded.
 
+## Try it in 60 seconds
+
+[`examples/try.mjs`](https://github.com/Veenoway/interlude-sdk/blob/main/sdk/examples/try.mjs)
+is the whole loop in under fifty lines, with nothing but this package and viem: a throwaway key
+signs one grant, joins the public Paris Room, takes a few steps, leaves, and waits for the node
+to commit every one of those calls to Monad. Copy it next to a `package.json` that has both
+installed and run `node try.mjs`:
+
+```text
+player   0x49670E12AE25114272D78a7836198D5DBcD38c34
+join     412.4 ms
+move 1   53.7 ms
+move 2   53.9 ms
+move 3   55.8 ms
+move 0   39.9 ms
+leave    39.6 ms
+waiting for the node to commit that to Monad...
+batch 68 https://testnet.monadscan.com/tx/0x0c09a574b1d1e347ce967da29552fd7c631cfb86cfa76913fd54f600e66e2e11
+```
+
+The first call also opens the connection to the node; each one after it is a single round trip
+to the node, which is most of those milliseconds. The key is never funded:
+the node charges no gas, and the commit is the validator's transaction on the hub. The node
+commits every few seconds, so a walk can straddle two commits; the script prints one line per
+commit that carries its calls.
+
+The examples are in the repository, in `examples/` beside this README; the npm tarball carries
+only `dist` and this README. Inside a checkout they run against the built package, so run
+`pnpm --filter @interludelayer-sdk/sdk build` first.
+
 ## The shortest thing that works
 
-That snippet talks to the **public Room**. `https://rpc.interludelayer.xyz` serves
-that contract and no other. After `npx @interludelayer-sdk/cli ship`, pass the
-printed `app` and `node` into `createInterludeClient`. A 502 on that URL for a
-few minutes is the node image building.
+The snippet talks to the **Paris Room**, one of eight public floors (`PUBLIC_DEMO_FLOORS`;
+`nearestFloor()` picks the closest). `https://rpc.interludelayer.xyz` serves that contract and
+no other, and `roomAbi` is exported so the snippet runs as written. Pointing the SDK at a public
+floor is fine for experiments. Your own contract needs its own node: after
+`npx @interludelayer-sdk/cli ship`, pass the `app` and `node` it printed. That is what "do not
+point the SDK at Room's node" means elsewhere in these docs: a node refuses calls to any
+contract but its own (`WrongNodeError`). A 502 on a freshly shipped URL for a few minutes is the
+node image building.
 
 ```tsx
 import { createPublicClient, http, type WalletClient } from "viem";
 import { monadTestnet } from "viem/chains";
-import { createInterludeClient } from "@interludelayer-sdk/sdk";
+import { createInterludeClient, roomAbi } from "@interludelayer-sdk/sdk";
 import { createInterludeHooks } from "@interludelayer-sdk/sdk/react";
-import { roomAbi } from "./room-abi";
 
 const { InterludeProvider, useSession, useSessionCall } = createInterludeHooks(
   createInterludeClient({
-    app: "0x28C583542854f2E0b32930E5252687F6fA8D5d91",
+    app: "0xA116fcaEC711c9D8f64DA409CBE3AF673Fb9084C",
     abi: roomAbi,
     node: "https://rpc.interludelayer.xyz",
     base: createPublicClient({ chain: monadTestnet, transport: http() }),
@@ -52,17 +86,44 @@ export function Game({ wallet }: { wallet: WalletClient }) {
 }
 ```
 
-That is the whole client. For a contract you shipped, replace `app` and `node`
-with what the CLI printed. `open()` prompts the wallet once — the user signs a grant that
-says "this key may call `join` and `move`, for the next hour" — and the buttons never prompt
-again.
+That is the whole client. For a contract you shipped, replace `app`, `abi` and `node` with what
+the CLI printed (`interlude abi` writes the ABI). `open()` prompts the wallet once — the user
+signs a grant that says "this key may call `join` and `move`, for the next hour" — and the
+buttons never prompt again.
+
+`wallet` is a viem `WalletClient`, so with wagmi it is `useWalletClient()`'s `data`, as is.
+Until wagmi has one it is `undefined`: the provider restores nothing, and `open()` puts
+"connect a wallet" in `error` rather than throwing.
+
+```tsx
+import { useWalletClient } from "wagmi";
+
+export function Game() {
+  const { data: wallet } = useWalletClient();
+  return (
+    <InterludeProvider wallet={wallet} scope={["join", "move"]} ensureChain>
+      <Floor />
+    </InterludeProvider>
+  );
+}
+```
+
+`ensureChain` asks the wallet to switch to the base chain (and to add Monad testnet if it does
+not know it) before it signs, rather than failing on another network.
 
 A process is the same three lines, with `memoryStore()` and a key it holds.
-`examples/agent-room.mjs` does that against the public Room.
+`examples/try.mjs` and `examples/agent-room.mjs` do that against the public Room. On Node 22 and
+later, where `WebSocket` is a global, the client keeps a socket to the node open for the next
+call, and the SDK has no `close()` yet, so a script that is done does not exit by itself. End it
+with `process.exit()`, as both examples do, or pass `transport: http(node, { retryCount: 0 })`
+to `createInterludeClient`: every read and send is then a plain POST, and the process ends when
+its work does (a `watch` still holds its own socket until you stop it).
 
 Without React the core is the same three lines:
 
 ```ts
+import { createInterludeClient, roomAbi } from "@interludelayer-sdk/sdk";
+
 const interlude = createInterludeClient({ app, abi: roomAbi, node, base });
 
 const session = await interlude.openSession({ wallet, scope: ["join", "move"] });
@@ -75,6 +136,10 @@ const { latencyMs } = await session.send("move", [1]);
 ```bash
 npm i @interludelayer-sdk/sdk viem
 ```
+
+Node ≥ 20.9 for scripts and SSR. The React entry ships with `"use client"`, so it can be
+imported from a Next.js App Router page; the core entry has no directive and works on the
+server too.
 
 `viem` and `react` are peer dependencies. The main entry does not import React; only
 `@interludelayer-sdk/sdk/react` does.
@@ -138,16 +203,38 @@ tab is a key nobody remembers granting.
 
 ### Revocation
 
-`hub.bumpSessionEpoch()` is the panic button. It invalidates every grant the user has ever
-signed, for every Interlude app at once, in one base-chain transaction:
+`hub.bumpSessionEpoch()` invalidates every grant the user has ever signed, for every Interlude
+app at once, in one base-chain transaction:
 
 ```ts
 const { revoke } = useSession();
 await revoke(); // or interlude.revokeAll(wallet)
 ```
 
+**What it does not do yet: stop a stolen key on a node that is already running.** A node reads
+the session epoch at the block its delegation was pinned to. Until the app owner reopens the
+delegation, that node keeps accepting the old grant from whoever holds the key — the grant's
+expiry is the real bound on a leaked key — and it refuses the user's _new_ grant with
+`SessionEpochStaleError` (`pinnedByNode: true`), so the user cannot play on that node until the
+delegation moves. What the SDK does do: the client that revoked refuses to sign with the old
+key again (`SessionRevokedError`), drops it from storage, and refuses to open a grant the
+pending revocation would kill. Wire `revoke` to a deliberate "log out everywhere" action, not to
+an ordinary sign-out; `session.discard()` is the sign-out.
+
 Individual sessions do not need revoking; they expire. Default expiry is one hour, overridable
-with `expirySeconds`.
+with `expirySeconds` (on `openSession`, on the client, or on `<InterludeProvider>`).
+`<InterludeProvider autoRenew>` signs a fresh grant a minute before expiry (`{ beforeSeconds }`
+to change the lead), or halfway through a grant it signed that lives less than twice the lead;
+it is off by default because a browser wallet prompts for it.
+
+### The wallet's network
+
+`revokeAll`, `delegateAll`, `delegateKey`, `undelegate` and `releaseStake` check that the
+wallet is on the base chain before sending, and throw `WrongChainError` otherwise — a
+revocation sent to the wrong network used to "succeed" against an empty address. `openSession`
+does the same for a browser wallet, which would refuse to sign a grant for another chain with an
+unhelpful message. `interlude.ensureChain(wallet)` asks the wallet to switch (and to add Monad
+testnet if it does not know it); `openSession({ …, ensureChain: true })` does it for you.
 
 ## Reading state
 
@@ -156,21 +243,38 @@ await interlude.read("squareOf", [user]); // the node's live state
 await interlude.readSettled("squareOf", [user]); // the last committed value on the base chain
 ```
 
-The two differ by whatever the node has not committed yet — that gap is the whole design. In
-React:
+The two differ by whatever the node has not committed yet — that gap is the whole design. `read`
+is live for the state the node holds: a view over delegated slots sees every call the node has
+run, while anything else it touches (another contract, an undelegated slot) is read as of the
+block the delegation was pinned to. A view that reverts throws the same typed errors as a failed
+`send`: `AppRevertError` with the app's error name and arguments, or `UnrecognisedRevertError`
+(the node answers a reverted `eth_call` as JSON-RPC error 3 with the revert bytes). In React:
 
 ```tsx
-const { data, refetch } = useRead("squareOf", [user], { pollMs: 1000 });
+const { data, isLoading, isFetching, refetch } = useRead("squareOf", [user], { pollMs: 1000 });
 const { data: live } = useWatch("squareOf", [user]);
 const { status } = useNodeStatus();
 ```
 
-`useWatch` / `interlude.watchRead("squareOf", [user], setSquare)` opens a WebSocket
+`data` is typed from your ABI (`bigint | undefined` here). `isLoading` is only true until the
+first value for those arguments arrives, so a poll does not flash a spinner; `isFetching` is
+true whenever a read is in flight.
+
+`useWatch` / `interlude.watchRead("squareOf", [user], setSquare)` listens on a WebSocket
 (`interlude_subscribe("applied")`) and re-reads **your** view each time any call lands on
-that node. The socket is not tied to a contract shape: Clock, Room or an app you have not
+that node. The socket is not tied to a contract shape: Room or an app you have not
 written yet all hear the same event (`app`, `input`, `output`, `logs`). Decode `logs`
-against your ABI, or ignore them and just re-read. A node that does not serve the socket
-falls back to polling on its own.
+against your ABI, or ignore them and just re-read.
+
+One client opens one socket, however many watchers it has. Watchers of the same view with the
+same arguments share one read; a burst of calls collapses into at most one read in flight plus
+one trailing read (no more often than every 50 ms, `watch.minIntervalMs`), and a reply older than
+one already delivered is dropped, so a value never goes backwards. While the socket is down the
+views are polled instead (`watch.fallbackMs`, 500 ms). A dropped socket reconnects with a backoff
+capped at 30 s, and so does a subscription the node turned down for a transient reason — its
+`-32005` rate limit included, after the `retryAfterSecs` it asked for. Only a node that does not
+know `interlude_subscribe("applied")` at all (`-32601` / `-32602`) is polled for good, until the
+last watcher stops; the next one asks again.
 
 ```ts
 const stop = interlude.watch((call) => {
@@ -186,6 +290,25 @@ stop();
 pinned base block, the batches committed so far, and the diffs still pending. It is the quickest
 way to find out whether the node is serving the app your frontend thinks it is.
 
+A receipt from `send` is the ephemeral execution. Monad has those diffs only after a commit.
+Every `send` returns `settled`, a promise that resolves once a committed batch carries **that**
+transaction (with `batchIndex` and `settlementHash`), found through the node's batch log. It
+rejects with `SettlementLostError` if the node forgets the call — a restart that dropped what it
+had not committed; the node must have stopped knowing it for 15 s (`lostAfterMs`) or through two
+more batches, because a batch frozen for its commit when the node restarted is served nowhere
+until the new process lands it — and with `SettlementTimeoutError` after 60 s. It is lazy: unused `settled`
+does not poll. `send` itself does not wait, so tap latency stays the round trip.
+
+```ts
+const { result, hash, settled } = await session.send("move", [1]);
+// `result` is already the live return. Monad catches up on its own.
+await settled; // or `await interlude.waitSettled({ hash })`
+```
+
+`interlude.waitSettled()` without a `hash` waits for everything the node had executed when it
+was called: nothing pending, or two more batches committed since. It cannot notice a call a
+restarted node lost, so pass the `hash` when there is one.
+
 `interlude.commit()` publishes the pending diffs now instead of waiting out the node's interval,
 which is mostly useful in tests. A hosted node that set `INTERLUDE_COMMIT_TOKEN` needs
 `createInterludeClient({ …, commitToken })` or the call is refused.
@@ -198,14 +321,37 @@ still cannot tell you what the call returned. If the node does not serve the cus
 SDK falls back to `eth_call` + `eth_sendRawTransaction` + `eth_getTransactionReceipt` on its own,
 and `latencyMs` will show it.
 
-Measured against a local node on loopback, per `move` call: **1.3 ms** median wall clock end to
-end (p95 2.6 ms, min 1.0 ms), of which ~0.26 ms is the local ECDSA signature and ~0.28 ms is the
-bare HTTP round trip. The node's own execution is the sub-millisecond part; signing and JSON-RPC
-framing are most of what is left. The same suite on the fallback path measures 1.9 ms.
+Next to the node, a call takes **about 3 ms** from send to receipt. Over the network the round
+trip is **~40 ms**, so a call is mostly the network; the SDK's own `send` adds about 0.7 ms,
+signing included. The default transport is a **WebSocket** kept open for the tab; HTTP is the
+fallback. The first call of a session costs more, because the node reads that account's slots
+from Monad. The engine alone, on a laptop and not in production, answers
+`interlude_sendTransaction` in 228 µs p50. A user in another continent pays the fibre, not the
+EVM — `ship --region` puts the node next to them. How each figure was measured:
+[interludelayer.xyz/docs/performance](https://interludelayer.xyz/docs/performance).
 
 Nonces are tracked client-side for the same reason — asking the node for one before each call
-would double the round trips. If the count drifts (another tab, a restarted node) the SDK
-resynchronises once and retries.
+would double the round trips. Calls from one session key go out one at a time, in the order they
+were made, so twenty `send`s fired at once reach the node with their nonces in order. If the
+count drifts (another tab, a restarted node) the SDK resynchronises once and retries.
+
+A response lost on the way back never runs the call twice. Transactions go through a transport
+that does not retry on its own; when the outcome is unclear (the connection dropped, or the node
+says the nonce is used), the SDK first looks the signed transaction up by its hash. Found means
+it ran, and its receipt is the answer — or, when the receipt carries no return data,
+`ResultUnavailableError` says it ran rather than sending it again. Not found means it never
+arrived, and the _same_ signed bytes are sent again, over HTTP when it was the socket that lost
+them. A new transaction is only signed once the node has confirmed the old one does not exist.
+The socket then rests, not for good: sends stay on HTTP for 2 s, twice that after each further
+loss in a row (up to a minute), and go back over a fresh connection after that (at the node's
+URL with `?interlude_send=N`, so that viem opens a new socket instead of reusing the one that
+lost the send).
+
+Backpressure is retried for you: when the node's open batch is full it answers "retry after the
+next commit", and `send` waits (150 ms, doubling, `busyRetries` times, default 5) and sends the
+same transaction again before throwing `NodeBusyError`. A rate limit (JSON-RPC `-32005`, or HTTP
+429) is retried the same way after the `retryAfterSecs` the node names, as long as that is at
+most 5 s; `NodeBusyError.kind` is `"limit"` for those and `"batch"` for a full batch.
 
 ## Errors
 
@@ -227,6 +373,14 @@ and decoded arguments.
 | `AppRevertError` | The app's own rule, with its name and arguments. |
 | `UnrecognisedRevertError` | Revert data no error in the ABI matches. |
 | `NodeUnreachableError` | The node did not answer. |
+| `NodeBusyError` | The node's open batch is full (`retryable`, already retried) or the call can never fit (`retryable: false`). |
+| `WrongNodeError` | The node at `node` serves another app. |
+| `WriteOutsideDelegationError` | The call writes state the delegation does not cover; the node dropped it whole. |
+| `WrongChainError` | The wallet is on another network than the base chain. Nothing was sent or signed. |
+| `SessionRevokedError` | This client revoked the grant with `revokeAll`; it will not sign with that key again. |
+| `ResultUnavailableError` | The call ran but its response was lost and the receipt has no return data. It was not sent again. |
+| `SettlementLostError` | `settled`: the node no longer knows the call (a restart dropped it). |
+| `SettlementTimeoutError` | `settled` / `waitSettled`: no commit carried it in time. |
 | `InvalidScopeError` | The scope names a function the ABI does not have. |
 
 Also `SessionGranterIsZeroError`, `SessionKeyIsZeroError`, `MalformedSessionCallError`,
@@ -260,6 +414,22 @@ await interlude.delegateAll(ownerWallet);
 await interlude.delegateKey(ownerWallet, keyOf(userAddress));
 ```
 
+## Closing the session
+
+`undelegate` ends the session, but the app stays **locked** on Monad, and the
+validator's stake stays reserved, for the challenge window (~1 hour on the deployed
+terms, plus any time spent frozen in a dispute): a fraud found in that window can
+still be unwound. That does **not** clear itself — when `stakeUnlockAt` has passed,
+call `releaseStake` (permissionless; reverts with `StakeStillLocked` if you are
+early). Only `releaseStake` or a slash unlocks the app. A keeper / control plane can
+do that on a timer; the SDK does not wait out the window for you.
+
+```ts
+await interlude.undelegate(ownerWallet);
+// …after the challenge window…
+await interlude.releaseStake(anyWallet);
+```
+
 ## API
 
 `@interludelayer-sdk/sdk`
@@ -269,21 +439,26 @@ await interlude.delegateKey(ownerWallet, keyOf(userAddress));
 | `createInterludeClient(config)` | The core client. |
 | `client.openSession(options)` | Restore, or prompt once and sign. |
 | `client.restoreSession(granter)` | Restore, or `null`. Never prompts. |
-| `session.send(fn, args)` | A gasless call. Returns `{ result, receipt, hash, latencyMs }`. |
+| `session.send(fn, args)` | A gasless call. Returns `{ result, receipt, hash, latencyMs, settled }`. |
 | `session.covers(entry)`, `session.isExpired()`, `session.discard()` | |
 | `client.read`, `client.readSettled` | View calls against the node and the base chain. |
+| `client.watch(onCall)`, `client.watchRead(fn, args, onValue)` | Every call the node applies, or a view re-read after each, over one shared WebSocket. |
+| `client.waitSettled({ hash })` | What `settled` does, for a hash you kept. |
 | `client.status()`, `client.commit()` | `interlude_session`, `interlude_commit`. |
 | `client.revokeAll(wallet)` | `hub.bumpSessionEpoch()`. |
+| `client.delegateAll` / `delegateKey` / `undelegate` / `releaseStake` | Owner open/close; `releaseStake` after the challenge window. |
 | `client.epochOf(user)`, `client.hubAddress()`, `client.baseChainId()` | |
 | `client.sessionDigest(grant)`, `client.sessionDigestOnChain(grant)` | For comparing the two. |
 | `sessionGrantTypedData`, `sessionGrantDigest`, `signSessionGrant`, `resolveScope`, `grantCovers` | The grant primitives, usable on their own. |
 | `memoryStore()`, `webStorageStore(storage)`, `defaultStore()` | |
 | `delegatableAbi`, `hubAbi`, `keyOf`, `GLOBAL_PARTITION` | |
+| `roomAbi` | The public Room's floor: `join`, `move`, `jump`, `hit`, `leave`, its reads and every error Room itself declares. |
+| `PUBLIC_DEMO_FLOORS`, `nearestFloor(floors?)` | The eight public Rooms on hub v3, and the one control says is closest. |
 
 `@interludelayer-sdk/sdk/react`
 
 `createInterludeHooks(client)` returns `InterludeProvider`, `useSession`, `useSessionCall`,
-`useRead`, `useNodeStatus`, `useInterlude`.
+`useRead`, `useWatch`, `useNodeStatus`, `useInterlude`.
 
 It is a factory rather than free hooks because React context cannot be generic: erased to `Abi`,
 `send("move", [3n])` would take a `string` and an `unknown[]` and check neither. Bind the client
@@ -296,17 +471,27 @@ so a bare `onClick={() => move.send([3n])}` cannot produce an unhandled rejectio
 ## Tests
 
 ```bash
-pnpm test:sdk:e2e   # from the repo root; or scripts/sdk-e2e.sh
+pnpm --filter @interludelayer-sdk/sdk test   # unit suites; no chain, no node
+pnpm test:sdk:e2e                            # from the repo root; or scripts/sdk-e2e.sh
 ```
 
-There is one entry point because there is nothing worth testing against a mock: the digest tests
-compare against a deployed app's own `sessionDigest`, and the rest talks to a node. The script
-starts anvil, deploys the hub and `Players`, delegates the player's partition, starts the node
-against anvil, then runs the suite — a session opened and used, `_actor()` resolving to the
-granter, a commit settling on chain, a session restored from a real `sessionStorage` across a
-remount, and every failure mode: out of scope, expired, and revoked by `bumpSessionEpoch()`.
+Most of the SDK's behaviour is what it does when the network does not cooperate, and that is
+tested without one. `test/fake.ts` is an in-process node that answers with the real node's error
+wording: `client.test.ts` drives it through lost responses, full batches, rate limits, a
+restarted node that forgot a call, a wrong chain and a wrong node; `watch.test.ts` scripts the
+socket's subscriptions, drops and reconnects; `react-unit.test.tsx` runs the hooks in a DOM
+against a scripted client. `tsc --noEmit` also checks `test/types.check.ts`, the calls the types
+have to refuse.
+
+What a mock cannot answer is whether the SDK and a deployed contract agree: the EIP-712 digest,
+`_actor()`, a commit on chain. Those suites (`digest`, `e2e`, `react`) are skipped unless a live
+stack is named. The e2e script starts anvil, deploys the hub and `Players`, delegates the
+player's partition, starts the node against anvil, then runs them — a session opened and used,
+`_actor()` resolving to the granter, a commit settling on chain, a session restored from a real
+`sessionStorage` across a remount, and every failure mode: out of scope, expired, and revoked by
+`bumpSessionEpoch()`.
 
 `--keep` leaves the chain and the node running afterwards, which is the quickest way to point a
-frontend at them. With a stack already up, `pnpm --filter @interludelayer-sdk/sdk test` reruns the suite
-on its own, given `INTERLUDE_BASE_RPC`, `INTERLUDE_NODE_RPC`, `INTERLUDE_APP` and
+frontend at them. With a stack already up, `pnpm --filter @interludelayer-sdk/sdk test` runs the
+live suites too, given `INTERLUDE_BASE_RPC`, `INTERLUDE_NODE_RPC`, `INTERLUDE_APP` and
 `INTERLUDE_PLAYER_PK`.

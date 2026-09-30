@@ -56,18 +56,33 @@ library Types {
     /// @dev Apps never negotiate any of this. They pick a validator (or take the default) and
     ///      the hub copies these terms into the delegation. Because a validator sets its own
     ///      terms, nobody can lock its bond on conditions it never agreed to.
+    /// @dev Every number here is bounded by the hub (`InterludeHub._setTerms`): a window long
+    ///      enough to overflow a deadline would lock an app forever, one short enough to expire
+    ///      in the same block would make a validator unchallengeable, and a bond of zero or of
+    ///      a fortune makes challenges free or impossible. The app can demand tighter values
+    ///      than the protocol's with `Delegatable._acceptTerms`.
     /// @param resolver adjudicates challenges against this validator
     /// @param stakePerDelegation reserved from the shared bond for each delegation
-    /// @param challengeBond what a challenger must put at risk
-    /// @param maxBatchInterval silence longer than this lets anyone force the session closed
-    /// @param maxDelegationDuration how long a session may run before anyone can force it
-    ///        closed, whatever it has been committing. `maxBatchInterval` only catches a node
-    ///        that stops talking; a node that keeps committing while refusing to serve anybody
-    ///        resets that clock forever, so the app stays locked and the only way out is the
-    ///        owner. This bounds that, and the hub caps it so a validator cannot pick forever.
-    /// @param challengeWindow how long the stake stays locked after a session ends
-    /// @param resolutionWindow how long the resolver has to adjudicate
-    /// @param delegationFee charged on open, so spamming sessions is not free
+    /// @param challengeBond what a challenger must put at risk. Between 1/100 and 10 times
+    ///        `stakePerDelegation`, and never zero.
+    /// @param maxBatchInterval the longest the node may go without a commit. Enforced:
+    ///        `forceClose` opens to anyone once it is exceeded (plus a short grace), so a live
+    ///        node sends empty heartbeat commits when it has nothing to say. At most seven days
+    ///        less the grace, and at most `maxDelegationDuration` when that is set.
+    /// @param maxDelegationDuration the lease, or 0 for none. With none, a session runs until
+    ///        its owner undelegates, its validator resigns, its node stops committing, or a
+    ///        challenge ends it (a slash, or a timeout while the judges are silent); age alone
+    ///        never does. With one (at most 365 days), anyone can `forceClose` once it is over.
+    /// @param challengeWindow how long the stake stays locked, and the app with it, after a
+    ///        session ends. Extended by any time a challenge held the session frozen. Between
+    ///        ten minutes and seven days.
+    /// @param resolutionWindow the clock of each dispute move: every bisection move, and the
+    ///        judges' vote, must land within this much of the previous one. Between five
+    ///        minutes and one day.
+    /// @param maxDiffsPerCommit at most 256, so one batch can be committed and, after a slash,
+    ///        unwound inside one transaction
+    /// @param delegationFee charged on open, so spamming sessions is not free. Anything sent
+    ///        above it is credited back to the beneficiary.
     /// @param maxDelegations how many sessions this validator will serve at once
     /// @param timeoutPenaltyBps share of the challenger's bond forfeited if the resolver
     ///        never answers, so stalling a session repeatedly costs money
@@ -99,6 +114,8 @@ library Types {
     ///        entries and checks they fold to this root, so the list is on the chain rather
     ///        than served later from the node's disk. This is what makes the log the validator
     ///        posted the log it signed for.
+    /// @param stateRoot Merkle root of this batch's post-state (`hashOverlay`). Checked at
+    ///        commit, not merely recorded.
     struct Batch {
         address app;
         bytes32 partition;
@@ -109,9 +126,9 @@ library Types {
     }
 
     /// @notice One transaction of a batch, as the node executed it.
-    /// @dev The hash rather than the signed bytes, because that is all the hub needs to identify
-    ///      it and the bytes are self-authenticating: anyone handed them can check they hash to
-    ///      this. Keeping calldata small matters — a challenge submits the whole batch.
+    /// @dev The fold identity is the hash, not the signed bytes: `hashTxLog` and `txRoot` stay
+    ///      compact, and `BatchLog` does not re-emit giant blobs. The EIP-2718 bytes travel
+    ///      beside this as `commit`'s `raws` array, checked with `keccak256(raws[i]) == txHash`.
     /// @param txHash keccak256 of the EIP-2718 encoding, which is the transaction's own hash
     /// @param blockNumber the ephemeral block it ran in
     /// @param execTimestamp the clock it ran under, which is *not* the batch's. Blocks close
@@ -131,7 +148,12 @@ library Types {
     ///      to, so the hub's accounting can grow without anybody having to re-mirror it.
     /// @param baseBlock the block every read outside the delegated set must be taken at
     /// @param lastExecTimestamp the clock of the last accepted batch; the next may not go below
-    /// @param expiresAt when the session can be force-closed however alive it looks
+    /// @param lastCommitAt when the hub last accepted a commit. With `maxBatchInterval` this is
+    ///        the liveness clock: past `lastCommitAt + maxBatchInterval` plus a short grace,
+    ///        anyone may `forceClose`. A node heartbeats (commits empty batches) well before.
+    /// @param expiresAt lease end, or 0 for a session with no end. From a nonzero end on anyone
+    ///        may `forceClose` the session, however alive it is; the owner reopens with a fresh
+    ///        delegation. With 0 only a liveness failure opens `forceClose` to anyone.
     struct Session {
         address validator;
         address resolver;
@@ -151,11 +173,9 @@ library Types {
     }
 
     /// @notice An open dispute, in full, so anybody can redo the work behind it.
-    /// @dev The hub cannot re-execute the EVM, so it cannot decide which of the two roots below
-    ///      is right — that is still a resolver's call. What it can do is refuse to let the
-    ///      question be vague. Both numbers are on record before anybody rules, so the
-    ///      resolver's answer is reproducible by anyone holding the batch's transactions, and a
-    ///      resolver that rules against the arithmetic is visibly doing so.
+    /// @dev The hub cannot re-execute the EVM. A fraud challenge first bisects the posted log
+    ///      down to one transaction; algebraic one-steps are checked on chain. A committee
+    ///      vote is only for the leaf where both traces are well-formed and still disagree.
     /// @param batchIndex the batch under dispute. Its transactions are fixed by
     ///        `batchTxRoot(app, partition, batchIndex)`, so what is being replayed is not in
     ///        question either.
@@ -163,6 +183,8 @@ library Types {
     /// @param claimedRoot what the challenger says replaying those transactions produces.
     ///        Necessarily different from `publishedRoot` on a fraud challenge. Zero on an
     ///        availability challenge, which disputes the missing log rather than the arithmetic.
+    /// @param deadline the clock of the move currently expected (see `moveDeadlineOf`): each
+    ///        bisection move restarts it, so it is not a deadline for the dispute as a whole.
     /// @param kind fraud waits on a resolver; availability waits on `serveBatchLog`.
     struct Challenge {
         address challenger;
@@ -172,6 +194,43 @@ library Types {
         uint256 bond;
         uint64 deadline;
         ChallengeKind kind;
+    }
+
+    /// @notice Interactive search for the first transaction the two traces disagree on.
+    /// @dev The hub cannot execute the EVM. What it *can* derive is: a midpoint, a one-step
+    ///      overlay transition, a timeout on the player whose clock is running. The committee
+    ///      only votes when both sides posted a well-formed one-step from the same prefix
+    ///      to different roots — a real execution disagreement, not a vague batch root.
+    ///
+    ///      Every move runs on its own clock (`resolutionWindow`, restarted by each move), and a
+    ///      move after its clock ran out is refused. A timeout therefore always lands on the
+    ///      party whose turn it was when the clock expired, never on whoever moved last.
+    ///
+    ///      What this does *not* prove, stated plainly: the validator names every `midRoot`,
+    ///      so the game narrows the dispute to one transaction whose pre-state the validator
+    ///      itself chose, and the hub then checks only the Merkle algebra of the one-step it
+    ///      posts. Nothing on chain re-executes that transaction. When both sides post a
+    ///      well-formed one-step the leaf goes to the committee vote. Bisection makes a
+    ///      validator that will not play lose by timeout and shrinks what the judges must
+    ///      replay to a single transaction; it does not remove the judges.
+    enum BisectPhase {
+        None,
+        AwaitMid,
+        AwaitPick,
+        AwaitProve,
+        AwaitCounter,
+        Vote
+    }
+
+    struct BisectGame {
+        uint32 start;
+        uint32 end;
+        uint32 mid;
+        uint32 txCount;
+        BisectPhase phase;
+        bytes32 startRoot;
+        bytes32 endRoot;
+        bytes32 midRoot;
     }
 
     /// @notice A user's signed permission for a key it does not control to act as it.

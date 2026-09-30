@@ -52,7 +52,25 @@ export const GLOBAL_PARTITION =
  * from the validator, a real bond reserved per delegation, and a declared ruleset — because a
  * local stack that skipped those would pass while a real one failed.
  */
-function localTerms(resolver: Address) {
+/**
+ * What delegating to the local validator costs, forwarded with `delegateAll` / `delegateKey`.
+ *
+ * Not zero, for the same reason the repo's deploy scripts no longer use zero: a free delegation
+ * lets anyone open sessions against a validator until `maxDelegations` is full and every real
+ * app is turned away. The local stack charges what a real one would, so an app whose own
+ * delegation path forgets the fee fails here (`FeeNotPaid`) rather than on Monad.
+ * `INTERLUDE_LOCAL_DELEGATION_FEE` (wei) overrides it.
+ */
+export function localDelegationFee(env: NodeJS.ProcessEnv = process.env): bigint {
+  const raw = env.INTERLUDE_LOCAL_DELEGATION_FEE?.trim();
+  if (!raw) return parseEther("0.01");
+  if (!/^\d+$/.test(raw)) {
+    throw new ArtifactError(`INTERLUDE_LOCAL_DELEGATION_FEE must be a whole number of wei, got ${raw}`);
+  }
+  return BigInt(raw);
+}
+
+export function localTerms(resolver: Address, delegationFee: bigint = localDelegationFee()) {
   return {
     resolver,
     // Types.Spec.MonadTen. The node checks this against the rules it implements and refuses to
@@ -60,12 +78,13 @@ function localTerms(resolver: Address) {
     spec: 1,
     stakePerDelegation: parseEther("2"),
     challengeBond: parseEther("0.5"),
-    delegationFee: 0n,
+    delegationFee,
     maxBatchInterval: 3600n,
-    maxDelegationDuration: 86_400n,
+    // No lease end: a live session runs until its owner or validator ends it.
+    maxDelegationDuration: 0n,
     challengeWindow: 3600n,
     resolutionWindow: 1800n,
-    maxDiffsPerCommit: 64,
+    maxDiffsPerCommit: 256,
     maxDelegations: 8,
     timeoutPenaltyBps: 2000,
     open: true,
@@ -173,13 +192,15 @@ async function delegate(
   config: Config,
   step: (message: string) => void,
 ): Promise<Hex> {
+  // The validator's fee travels with the delegation (Delegatable forwards msg.value to the hub).
+  const fee = localDelegationFee();
   if (config.app.delegate === "all") {
     step("delegating the whole contract");
-    await send(chain, admin, app, abi, "delegateAll", []);
+    await send(chain, admin, app, abi, "delegateAll", [], fee);
     return GLOBAL_PARTITION;
   }
   step(`delegating one partition (${config.app.delegate})`);
-  await send(chain, admin, app, abi, "delegateKey", [config.app.delegate]);
+  await send(chain, admin, app, abi, "delegateKey", [config.app.delegate], fee);
   return config.app.delegate;
 }
 
@@ -349,7 +370,7 @@ async function sendRaw(
   }
 }
 
-function parseSignature(signature: string): AbiFunction {
+export function parseSignature(signature: string): AbiFunction {
   try {
     const item = parseAbiItem(
       signature.startsWith("function ") ? signature : `function ${signature}`,
@@ -365,6 +386,9 @@ function parseSignature(signature: string): AbiFunction {
 }
 
 // --- turning config strings into ABI values --------------------------------
+
+/** The marker `init` leaves in place of a constructor argument only the author can supply. */
+export const FILL_IN = /^<fill in\b/;
 
 function coerceConstructorArgs(
   abi: Abi,
@@ -393,14 +417,23 @@ function coerceConstructorArgs(
  * expressible in TOML and would be guesswork to map, and guessing wrong here means deploying a
  * contract configured differently from what the file says. Such a project can use `script`.
  */
-function coerce(
+export function coerce(
   inputs: readonly AbiParameter[],
   args: string[],
   known: Partial<Record<Placeholder, string>>,
   where: string,
 ): unknown[] {
   return inputs.map((input, index) => {
-    const raw = substitute(args[index] ?? "", known);
+    const written = args[index] ?? "";
+    // What `init` writes for an argument it cannot know. Named rather than parsed, so the reader
+    // is told which line of their file to finish instead of "wants uint256, got <fill in ...>".
+    if (FILL_IN.test(written)) {
+      throw new ArtifactError(
+        `${where}: argument ${index} (${input.type}${input.name ? ` ${input.name}` : ""}) is ` +
+          `still ${written} in interlude.toml. Replace it with the value to deploy with.`,
+      );
+    }
+    const raw = substitute(written, known);
     const type = input.type;
 
     if (type === "address") {

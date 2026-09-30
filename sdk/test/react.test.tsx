@@ -22,6 +22,7 @@ import { anvil } from "viem/chains";
 
 import { createInterludeClient, type SendResult, type Session } from "../src/index";
 import { createInterludeHooks } from "../src/react/index";
+import { LIVE } from "./live";
 import { playersAbi } from "./players";
 
 const baseRpc = process.env.INTERLUDE_BASE_RPC ?? "http://127.0.0.1:8545";
@@ -78,7 +79,7 @@ interface Seen {
   session: Session<typeof playersAbi> | null;
   isRestoring: boolean;
   open: () => Promise<Session<typeof playersAbi> | undefined>;
-  send: (args?: readonly [bigint]) => Promise<SendResult<unknown> | undefined>;
+  send: (args: readonly [bigint]) => Promise<SendResult<unknown> | undefined>;
   data: unknown;
   latencyMs: number | undefined;
   error: Error | null;
@@ -137,7 +138,7 @@ async function waitFor(predicate: () => boolean, what: string, timeout = 10_000)
   throw new Error(`timed out waiting for ${what}`);
 }
 
-describe("the React hooks", () => {
+describe.skipIf(!LIVE)("the React hooks against a live node", () => {
   beforeAll(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     expect(app, "INTERLUDE_APP must name the deployed Players").toMatch(/^0x[0-9a-fA-F]{40}$/);

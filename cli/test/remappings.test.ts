@@ -80,10 +80,27 @@ describe("writing the remapping", () => {
     const dest = vendorContracts(dir, bundled);
     expect(dest).toBe(join(dir, "lib", "interlude"));
     expect(existsSync(join(dest, "Delegatable.sol"))).toBe(true);
+    expect(readFileSync(join(dest, "interfaces", "IInterludeHub.sol"), "utf8")).toMatch(
+      /function bisect/,
+    );
+    expect(readFileSync(join(dest, "interfaces", "Types.sol"), "utf8")).toMatch(/struct BisectGame/);
 
     const written = ensureRemapping(dir, bundled);
     expect(written.line).toBe(`${CONTRACTS_REMAPPING}=lib/interlude/`);
     expect(readFileSync(written.path, "utf8")).toBe(`${CONTRACTS_REMAPPING}=lib/interlude/\n`);
+  });
+
+  it("vendors a copy installed in the project's own node_modules too", () => {
+    // `npm i -D @interludelayer-sdk/cli` puts the sources inside the project, but under a
+    // directory the next `npm ci` rewrites. The remapping has to name lib/interlude, as the
+    // README says, not node_modules/.
+    const dir = mkdtempSync(join(tmpdir(), "interlude-installed-"));
+    const installed = join(dir, "node_modules", "@interludelayer-sdk", "cli", "contracts");
+    mkdirSync(installed, { recursive: true });
+    writeFileSync(join(installed, "Delegatable.sol"), "// stand-in\n");
+    const written = ensureRemapping(dir, installed);
+    expect(written.line).toBe(`${CONTRACTS_REMAPPING}=lib/interlude/`);
+    expect(existsSync(join(dir, "lib", "interlude", "Delegatable.sol"))).toBe(true);
   });
 
   it("replaces a remapping Foundry cannot follow", () => {

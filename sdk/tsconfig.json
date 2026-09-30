@@ -14,6 +14,6 @@
     "declaration": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "tsup.config.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "test/**/*.tsx", "tsup.config.ts"],
   "exclude": ["node_modules", "dist"]
 }

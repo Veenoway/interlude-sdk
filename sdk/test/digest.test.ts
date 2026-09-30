@@ -14,6 +14,7 @@ import {
 
 import { delegatableAbi } from "../src/abi";
 import { sessionGrantDigest, type SessionGrant } from "../src/grant";
+import { LIVE } from "./live";
 
 const rpc = process.env.INTERLUDE_BASE_RPC ?? "http://127.0.0.1:8545";
 const app = (process.env.INTERLUDE_APP ?? "") as Address;
@@ -124,7 +125,7 @@ const cases: Array<[string, SessionGrant]> = [
   ],
 ];
 
-describe("the grant digest", () => {
+describe.skipIf(!LIVE)("the grant digest", () => {
   let base: PublicClient;
   let chainId: number;
 

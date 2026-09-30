@@ -4,34 +4,181 @@ Send us the bytecode. We deploy it, we pay, we run the node.
 
 ```sh
 cd my-foundry-project
-npx @interludelayer-sdk/cli init
+npx @interludelayer-sdk/cli init        # exits 1 until a contract inherits Delegatable — expected
 npx @interludelayer-sdk/cli gen --contract YourApp
 # import {YourAppInterludeSurface} from "./YourAppInterludeSurface.sol";
+npx @interludelayer-sdk/cli init --contract YourApp
 npx @interludelayer-sdk/cli check
-npx @interludelayer-sdk/cli ship
+npx @interludelayer-sdk/cli ship --owner 0xYourWallet --out .env.local
+npx @interludelayer-sdk/cli abi --out src/abi.ts
+npx @interludelayer-sdk/cli status 0xYourApp
 ```
 
-`ship` talks to `https://control.interludelayer.xyz`. Nothing to set. The CLI prints
-an app address and a node URL. The first node takes a few minutes to come up; a
-502 right after the command is the image building. Point the SDK at that URL, not
-at `https://rpc.interludelayer.xyz` (Room only).
+Your project needs **solc 0.8.28 or later and `evm_version` cancun or later**: the vendored
+contracts use transient storage (`tstore`). A fresh `forge init` is fine as it is; `init` warns
+if `foundry.toml` pins something older. The starter it prints uses `pragma solidity ^0.8.28`.
 
-The hub artifact and the Solidity a contract inherits (`Delegatable`, `Types`) are bundled.
-`init` copies those sources into `lib/interlude` when they sit outside the project: Foundry
-will not follow a remapping into the `npx` cache.
+## `init`
+
+`init` writes `@interludelayer/contracts/=lib/interlude/` into `remappings.txt` and copies the
+sources into `lib/interlude` — also when the CLI is installed in your `node_modules`, since
+Foundry will not follow a remapping into the `npx` cache and `node_modules` is rewritten by the
+next install. Then it compiles and looks for contracts that inherit `Delegatable`.
+
+Until one does — and a fresh `forge init` with only `Counter.sol` does not — it prints a starter
+contract and **exits 1**. That is the first hour: add the starter, annotate, `gen`, then
+`init --contract YourApp` writes `interlude.toml`.
+
+Constructor arguments it can name are filled in: the hub (typed `IInterludeHub`, or named
+`hub`, or the only address) becomes `"$HUB"`. Anything else is written as
+`"<fill in: uint256 minBet>"`, and both `ship` and `dev` refuse that marker by name until you
+replace it. It used to write `"0"`, which deploys fine and is wrong.
+
+## `ship`
+
+`ship` talks to `https://control.interludelayer.xyz` (`INTERLUDE_CONTROL_URL` or `--control`
+to override). Nothing to set. It sends:
+
+- the bytecode and the whole ABI;
+- `args` from `[app]` in `interlude.toml`, one string per constructor input, `"$HUB"` for the
+  hub. A constructor that takes only the hub needs no `args`. Any other constructor without
+  `args` is refused here — `ship` does not guess, and the hosted deployer no longer does either;
+- every `[[setup]]` call, run by the deploying key before `delegateAll` (so it can seed
+  delegated state). `$HUB` is the only placeholder on the hosted path; `value` is refused;
+- `owner`, from `--owner 0x...` or `owner = "0x..."` under `[app]`.
+
+It prints the app address and the node URL, and `--out .env.local` merges
+`NEXT_PUBLIC_INTERLUDE_APP`, `NEXT_PUBLIC_INTERLUDE_NODE` and `NEXT_PUBLIC_INTERLUDE_BASE_RPC`
+into that file (other lines are kept).
+
+### Who owns the app
+
+Control deploys and delegates with its own key — `delegateAll()` is owner-only, so it has to.
+**Without `--owner`, Interlude's key stays the owner**, and `ship` says so loudly. With
+`--owner`, control offers ownership to that address once the delegation is open, and `ship`
+prints the one command that takes it:
+
+```sh
+cast send 0xYourApp "acceptOwnership()" --rpc-url https://testnet-rpc.monad.xyz --interactive
+```
+
+Until that runs, Interlude's key is still the owner. `interlude status 0xYourApp` shows the
+owner and the pending owner.
+
+The owner is your own wallet's address. Never one of anvil's ten default accounts
+(`0xf39F…2266`, `0x7099…79C8`, `0x3C44…93BC`, `0x90F7…b906`, …): their private keys are printed
+in anvil's banner, so whoever sent `acceptOwnership()` first would own the app, and could
+undelegate it, re-seed it and receive its slash payouts. `ship` refuses them, from `--owner` or
+from `[app] owner`, before it sends anything — unless `--control` is a control plane on this
+machine, which deploys on a local chain where those accounts are the point. `interlude.toml`
+itself only checks that `owner` is an address: `dev` and `abi` read the same file and ignore
+the owner.
+
+### When it fails, and running it twice
+
+If control deploys the contract and then fails (the machine, the delegation), `ship` still
+prints the `app` address and the retry: `interlude sessions create <app>`. Deploys are rate
+limited per IP, so `ship` remembers what it shipped in `.interlude/shipped.json`: the same build
+(bytecode, args, setup, owner) twice is refused with the existing app's address; `--again`
+deploys a second copy. The request times out after 10 minutes (dots while it waits); a network
+failure names the host rather than printing a stack.
+
+`--region us|ny|eu|asia|sa|tokyo|mumbai|africa` sits the node on Fly metal in that city
+(California, New York, Paris, Singapore, São Paulo, Tokyo, Mumbai, Johannesburg). Omit it and we
+pick from where you called `ship`: a country header on control or the Fly edge your request
+came in through. On a TTY `ship` asks
+for a short name so the machine is `il-tokyo-pongit-<hex>`; `--name` skips the prompt. One
+writer, so one region — two replicas would both try to publish the same batch. The first node
+takes a few minutes to come up; a 502 right after the command is the image building. Point the
+SDK at that URL, not at `https://rpc.interludelayer.xyz` (Room only).
+
+### A node for a contract you deployed yourself: `sessions create`
+
+Control runs a node on its own account only for an app it deployed (`ship`), or one whose owner
+asked for it. Delegating to our validator is not enough on its own: that would give anyone a
+free machine. So for an app you deployed and delegated yourself (or one shipped before control
+was redeployed and forgot it), the address `owner()` returns signs an EIP-191 message naming the
+app and the hub session's epoch:
+
+```sh
+interlude sessions opt-in 0xYourApp        # prints the message, with the epoch read from the hub
+cast wallet sign --interactive "interlude:provision:0xyourapp:<epoch>"
+interlude sessions create 0xYourApp --signature 0x...
+```
+
+`sessions create` without `--signature` prints the same thing when control answers that an
+opt-in is needed. The epoch changes each time the app delegates again, and so does the message:
+an old signature does not reopen a new session.
+
+### `per-key` is local only
+
+The hosted node serves the whole contract as one partition, `GLOBAL`. A contract that registers
+storage `per-key` would deploy, delegate, get a node — and then have every keyed write refused.
+So `init` and `ship` refuse it with a pointer to `global`. `gen` still generates it and `dev`
+still serves one key locally (`init --local` writes the config, then set `delegate` to the key).
+
+## `abi` and `status`
+
+`interlude abi [--contract X] [--out src/abi.ts]` writes `export const abi = [...] as const`
+from the compiled artifact, so viem infers function names and types. Without `--out` it prints
+the module; a path ending in `.json` gets the plain array.
+
+`interlude status <app>` reads the owner and pending owner from the app, the delegation (status,
+validator, epoch, batches, last commit) from its hub, and the node's `/health`. `--rpc` picks the
+chain (default `INTERLUDE_BASE_RPC`, then Monad testnet); `--node` the node (default: the one
+control has for that app).
+
+## `logs`
+
+`interlude logs --follow` opens `interlude_subscribe("applied")` on a node and prints one line
+per call the node runs, as it runs it:
+
+```
+<time>  <status>  <function>  block <n>  from <sender>  tx <hash>
+```
+
+Every field is what the node sent, except the time, which is when your machine received the
+call (UTC). There is no latency or gas column: the node reports neither, and the command does
+not make them up. The status is `ok` or `failed`: the node's `succeeded` flag, which is false
+for a revert and for a halt such as running out of gas, and the notification does not say
+which. `--abi` names the function (a JSON ABI, a forge artifact such as
+`out/YourApp.sol/YourApp.json`, or the file `interlude abi --out` wrote); without it you get the
+selector, and `(no selector)` for calldata shorter than four bytes. The block is the node's;
+which batch settles a call is decided at commit and is not in the notification (`dev` prints
+each batch as it settles). `--json` prints each notification as the node sent it, calldata,
+return data and logs included, plus two keys the command adds: `receivedAt` and, with `--abi`,
+`function`.
+
+A follower that falls far behind the node misses calls, and the node does not say which: the
+stream is what the node sent, not a guaranteed record of every call. A transaction's receipt
+(`eth_getTransactionReceipt` on the node) is.
+
+The node is `--node <url>`, else `INTERLUDE_NODE_URL`, else the node `ship` last gave this
+project. There is no public default: somebody else's node would print real calls that are not
+yours. A node that cannot be reached, refuses the subscription or does not answer within 10 s
+is an error — the command exits 1 with the reason and prints nothing on stdout — and so is a
+node that closes the stream later. A 429 on the upgrade means the node turned this machine away
+(too many sockets open to it, or its request budget spent), not that it is down. It runs on
+Node 20 and later: the socket is the `ws` package, which viem already depends on.
+
+## `dev`
 
 `dev` is the laptop loop (anvil, a hub, a validator, a node on loopback). A built
-`interlude-node` is not bundled, so set `INTERLUDE_NODE_BIN` outside a checkout. You do
-not need that binary to `ship`.
+`interlude-node` is not bundled, so set `INTERLUDE_NODE_BIN` outside a checkout. You do not need
+that binary to `ship`. Before compiling or starting anything, `dev` checks that both ports are
+free and that the node binary exists. anvil runs with `--disable-code-size-limit`: the hub is
+over EIP-170's 24 KB, as Monad allows and a stock anvil does not.
 
-`init` writes `@interludelayer/contracts/=lib/interlude/` into `remappings.txt` if it is
-missing, even when nothing inherits `Delegatable` yet. That is the first hour: vendor,
-inherit, annotate, `gen`, `init` again, `check`, `ship`.
+The hub artifact and the Solidity a contract inherits (`Delegatable`, `Types`) are bundled,
+including `bisect` / `proveStep` / `BisectGame`. The hub is v3: the same code as the hub live
+on Monad testnet at
+[`0x98922c6E…C43e`](https://testnet.monadscan.com/address/0x98922c6E5e4Bea62761C71D2401c7ec2c26eC43e),
+of which `dev` deploys a fresh copy on anvil. Publishing without a `pnpm bundle` after the hub
+ABI moves is how `npx` deploys last week's bytecode.
 
-`init` compiles the project, finds the contracts that inherit `Delegatable`, and writes an
-`interlude.toml`. `dev` reads it and stands up everything a session needs: a base chain, the
-hub, a bonded validator with published terms, your contract, the delegation, and a node pointed
-at it. Then it watches, and checks each batch against the chain as it settles.
+`dev` reads `interlude.toml` and stands up everything a session needs: a base chain, the hub, a
+bonded validator with published terms, your contract, the delegation, and a node pointed at it.
+Then it watches, and checks each batch against the chain as it settles.
 
 This exists because the answer to "how do I try this on my contract" used to be "read five shell
 scripts and write a sixth". None of that work is yours: the hub, the validator and the bond are
@@ -147,15 +294,16 @@ repository converged on.
 ```toml
 [app]
 contract = "Chips"        # a Foundry artifact name; this command deploys it
-args = ["$HUB", "1000"]   # constructor arguments, as strings
-delegate = "all"          # "all", or a 32-byte key for one partition
+args = ["$HUB", "1000"]   # constructor arguments, as strings — dev and ship both send them
+delegate = "all"          # "all", or a 32-byte key for one partition (dev only)
+owner = "0xYourWallet"    # ship: who owns it afterwards; your own address, never anvil's
 
 # Calls to make after the app is deployed and before it is delegated. Anything that seeds
 # delegated state belongs here: once a partition is handed over, the write guard refuses
 # base-chain writes to it, so seeding afterwards fails — correctly.
 [[setup]]
 signature = "credit(address,uint256)"
-args = ["0x90F79bf6EB2c4f870365E785982E1f101E93b906", "1000"]
+args = ["0xYourWallet", "1000"]
 
 [chain]
 port = 8547
@@ -174,7 +322,9 @@ vars = { NEXT_PUBLIC_NODE = "$NODE_RPC", NEXT_PUBLIC_APP = "$APP" }
 
 Placeholders: `$HUB`, `$APP`, `$ADMIN`, `$VALIDATOR`, `$RESOLVER`, `$BASE_RPC`, `$NODE_RPC`.
 Using one before the thing it names exists is an error rather than an empty string — `$APP` in
-the app's own constructor arguments, for instance.
+the app's own constructor arguments, for instance. `ship` knows only `$HUB`: the others name
+accounts and URLs that `dev` creates on your laptop, and it refuses them before sending.
+`[env]` is `dev`'s; for `ship`, use `--out`.
 
 `chain_id` under `[node]` has to differ from the base chain's. `Delegatable.isEphemeral()`
 compares the two, and if they match, every delegated write reverts. The command refuses to go
@@ -198,8 +348,9 @@ obliged to print addresses in a shape a regular expression expects.
 
 ## Requirements
 
-`forge`, `cast` and `anvil` on `PATH` ([getfoundry.sh](https://getfoundry.sh)), and a node
-binary. In an Interlude checkout the binary is built for you on first run, which takes a minute;
+Node 20 or later. `forge`, `cast` and `anvil` on `PATH` ([getfoundry.sh](https://getfoundry.sh)),
+solc 0.8.28+ with `evm_version` cancun or later, and — for `dev` only — a node binary. In an
+Interlude checkout the binary is built for you on first run, which takes a minute;
 elsewhere, set `INTERLUDE_NODE_BIN` to one.
 
 - `INTERLUDE_NODE_BIN` — a built `interlude-node`. In a checkout the command builds it on first
@@ -208,6 +359,17 @@ elsewhere, set `INTERLUDE_NODE_BIN` to one.
   only to point at a different `forge out/` you compiled yourself.
 - `INTERLUDE_CONTRACTS` — optional. Directory holding `Delegatable.sol`. The same sources are
   bundled in this package; set this to point at a checkout you are editing.
+- `INTERLUDE_CONTROL_URL` — optional. The control plane `ship`, `sessions` and `status` talk to.
+- `INTERLUDE_NODE_URL` — optional. The node `logs --follow` follows when `--node` is not given.
+- `INTERLUDE_BASE_RPC` — optional. The chain `status` and `sessions opt-in` read and
+  `ship --out` writes (default `https://testnet-rpc.monad.xyz`).
+- `INTERLUDE_LOCAL_DELEGATION_FEE` — optional, wei. What `dev`'s local validator charges per
+  delegation (default 0.01 MON, forwarded with `delegateAll`). A free delegation is how anyone
+  fills a validator's `maxDelegations`, so the local stack charges one like a real validator.
+- `INTERLUDE_DEBUG=1` — print the stack for an unexpected error instead of one sentence.
+
+Paths with spaces or accents (`~/Library/Application Support/...`, a home directory named
+José) work: the CLI decodes its own location with `fileURLToPath`. Since 0.2.0.
 
 Constructor arguments are read from config as value types only — addresses, integers, booleans,
 strings and fixed bytes. A tuple or an array is expressible in TOML and would be guesswork to

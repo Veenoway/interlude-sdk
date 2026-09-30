@@ -39,6 +39,12 @@ library DelegatedLayout {
     ///        the validator has chosen to post, which is only reasonable for state that is not
     ///        worth stealing: the stake is what a validator forfeits for cheating, so an app
     ///        holding more value than that makes fraud profitable arithmetic.
+    /// @param pendingOwner the owner-elect of a two-step hand-over; zero when none is under way
+    /// @param slashBeneficiary who the app's share of a slashed stake is paid to. Zero means
+    ///        the owner, read at the moment a delegation opens.
+    /// @dev Fields are only ever appended. A proxy's storage was laid out by the version that
+    ///      initialised it, so inserting one would shift every field after it. The whole struct
+    ///      has to stay inside `NS_SIZE - 1` slots, clear of `SESSION_SLOT`.
     struct Layout {
         address owner;
         bool initialized;
@@ -49,6 +55,8 @@ library DelegatedLayout {
         bytes32[] globalMappingBases;
         bytes32[] perKeyBases;
         uint256 minStake;
+        address pendingOwner;
+        address slashBeneficiary;
     }
 
     error DelegatedWritesDisabled();

@@ -5,17 +5,40 @@
  * EIP-712 grant, opens a board, then presses. Watch the explorer for the
  * presses, then the settle on Monad.
  *
- *   pnpm --filter @interludelayer-sdk/sdk exec node examples/agent-clock.mjs
+ * It runs against the built package, so build it first:
  *
- * Optional: INTERLUDE_NODE, INTERLUDE_CLOCK, INTERLUDE_BASE_RPC, AGENT_PRESSES.
+ *   pnpm --filter @interludelayer-sdk/sdk build
+ *   INTERLUDE_CLOCK=0x… INTERLUDE_NODE=https://… \
+ *     pnpm --filter @interludelayer-sdk/sdk exec node examples/agent-clock.mjs
+ *
+ * Required: INTERLUDE_CLOCK (the Clock's address) and INTERLUDE_NODE (the node that serves
+ * that Clock). There is no default: every node serves exactly one contract, and the public
+ * url this used to default to serves the Room, which refuses a Clock call with `WrongTarget`.
+ * The names `interlude ship --out` writes (NEXT_PUBLIC_INTERLUDE_APP, _NODE, _BASE_RPC) are read
+ * too, so a shipped Clock's .env.local works as is.
+ * Optional: INTERLUDE_BASE_RPC, AGENT_PRESSES.
  */
 import { createPublicClient, createWalletClient, http } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { createInterludeClient, memoryStore } from "../dist/index.js";
 
-const NODE = process.env.INTERLUDE_NODE ?? "https://rpc.interludelayer.xyz";
-const APP = process.env.INTERLUDE_CLOCK ?? "0x7584eeEe58787a3C88411905efD4d379B274fF7d";
-const BASE_RPC = process.env.INTERLUDE_BASE_RPC ?? "https://testnet-rpc.monad.xyz";
+const { createInterludeClient, memoryStore } = await import("../dist/index.js").catch(() => {
+  console.error("The SDK is not built: run `pnpm --filter @interludelayer-sdk/sdk build` first.");
+  process.exit(1);
+});
+
+const NODE = process.env.INTERLUDE_NODE ?? process.env.NEXT_PUBLIC_INTERLUDE_NODE;
+const APP = process.env.INTERLUDE_CLOCK ?? process.env.NEXT_PUBLIC_INTERLUDE_APP;
+const BASE_RPC =
+  process.env.INTERLUDE_BASE_RPC ??
+  process.env.NEXT_PUBLIC_INTERLUDE_BASE_RPC ??
+  "https://testnet-rpc.monad.xyz";
+if (!NODE || !APP) {
+  console.error(
+    "Set INTERLUDE_CLOCK to the Clock's address and INTERLUDE_NODE to the node serving it " +
+      "(both printed by `interlude ship`).",
+  );
+  process.exit(1);
+}
 const PRESSES = Number(process.env.AGENT_PRESSES ?? 12);
 const BUDGET_MS = 60_000;
 const EXPLORER = "https://demo.interludelayer.xyz/explorer";

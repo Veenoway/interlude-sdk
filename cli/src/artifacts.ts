@@ -9,6 +9,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Abi } from "viem";
 
 export class ArtifactError extends Error {
@@ -175,7 +176,7 @@ export function findInterludeOut(startFrom: string): string {
     return override;
   }
 
-  const bundled = resolve(dirname(new URL(import.meta.url).pathname), "..", "artifacts");
+  const bundled = bundledDir(import.meta.url, "artifacts");
   if (existsSync(join(bundled, "InterludeHub.sol"))) return bundled;
 
   let at = resolve(startFrom);
@@ -192,6 +193,21 @@ export function findInterludeOut(startFrom: string): string {
     }
     at = up;
   }
+}
+
+/**
+ * A directory shipped beside this command — `artifacts/` or `contracts/` — one level above the
+ * module that asks.
+ *
+ * `fileURLToPath` rather than `new URL(...).pathname`, and the difference is not cosmetic. A
+ * URL's path is percent-encoded, so `~/Library/Application Support/...` or a home directory
+ * named "José" came back as `Application%20Support` and `Jos%C3%A9` — directories that do not
+ * exist — and the command then reported that its own bundled files were missing. On Windows the
+ * pathname also keeps a slash in front of the drive letter. The same call works from `src/`
+ * under tsx and from `dist/` once bundled, because both sit one level below the package root.
+ */
+export function bundledDir(moduleUrl: string, name: string): string {
+  return resolve(dirname(fileURLToPath(moduleUrl)), "..", name);
 }
 
 /** Compile the project, so nothing downstream is reasoning about a stale artifact. */

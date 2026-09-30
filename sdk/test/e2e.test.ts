@@ -25,6 +25,7 @@ import {
   SelectorOutOfSessionScopeError,
   SessionEpochStaleError,
   SessionExpiredError,
+  SettlementTimeoutError,
   createInterludeClient,
   createNodeClient,
   decodeRevert,
@@ -40,6 +41,7 @@ import {
   type Session,
   type SessionStore,
 } from "../src/index";
+import { LIVE } from "./live";
 import { playersAbi } from "./players";
 
 const baseRpc = process.env.INTERLUDE_BASE_RPC ?? "http://127.0.0.1:8545";
@@ -83,7 +85,7 @@ function newClient(store = webStorageStore(tab), overrides = {}): InterludeClien
   });
 }
 
-describe("a session key against a live node", () => {
+describe.skipIf(!LIVE)("a session key against a live node", () => {
   let client: InterludeClient<typeof playersAbi>;
   let session: Session<typeof playersAbi>;
 
@@ -163,6 +165,10 @@ describe("a session key against a live node", () => {
     expect(status.pendingDiffs[0]?.slot.toLowerCase()).toBe(
       (await client.read("squareSlot", [player.address])).toLowerCase(),
     );
+
+    await expect(client.waitSettled({ timeoutMs: 250, intervalMs: 80 })).rejects.toThrow(
+      SettlementTimeoutError,
+    );
   });
 
   it("reports what the node is serving", async () => {
@@ -211,6 +217,8 @@ describe("a session key against a live node", () => {
   });
 
   it("settles on the base chain when the node commits", async () => {
+    // Tracked by its own hash: `settled` resolves only once a committed batch carries it.
+    const sent = await session.send("move", [1n]);
     const ephemeral = await client.read("squareOf", [player.address]);
     expect(await client.readSettled("squareOf", [player.address])).not.toBe(ephemeral);
 
@@ -220,6 +228,13 @@ describe("a session key against a live node", () => {
 
     expect(await client.readSettled("squareOf", [player.address])).toBe(ephemeral);
     expect((await client.status()).pendingDiffs).toHaveLength(0);
+    const settled = await client.waitSettled({ timeoutMs: 5_000 });
+    expect(settled.pendingDiffs).toHaveLength(0);
+
+    const mine = await sent.settled;
+    expect(mine.committedBatches).toBeGreaterThanOrEqual(1);
+    // A node that keeps its transaction log names the batch; one that does not still settles.
+    if (mine.batchIndex !== undefined) expect(mine.batchIndex).toBe(mine.committedBatches);
   });
 
   /**

@@ -15,10 +15,11 @@ import type {
   Address,
   ContractFunctionArgs,
   ContractFunctionName,
+  ContractFunctionReturnType,
   Hex,
   WalletClient,
 } from "viem";
-import type { InterludeClient, SendResult, Session } from "../client";
+import type { ArgsParameter, InterludeClient, SendResult, Session } from "../client";
 import type { ScopeEntry } from "../grant";
 import type { SessionStatus } from "../transport";
 
@@ -37,6 +38,15 @@ export interface InterludeProviderProps {
   scope?: readonly ScopeEntry[];
   anyFunction?: boolean;
   expirySeconds?: number;
+  /**
+   * Sign a fresh grant shortly before the current one expires, so a long game does not stop on
+   * `SessionExpiredError`. Off by default because a browser wallet prompts for it: a popup the
+   * user did not ask for is worse than an expiry they can see coming. `true` renews 60 s early;
+   * a grant this provider signed that lives less than twice the lead renews halfway through.
+   */
+  autoRenew?: boolean | { beforeSeconds?: number };
+  /** Also switch the wallet to the base chain when opening, rather than failing on another one. */
+  ensureChain?: boolean;
   children: ReactNode;
 }
 
@@ -49,11 +59,27 @@ export interface UseSession<TAbi extends Abi> {
   error: Error | null;
   /** Prompt for a grant, or hand back the session already in hand. */
   open: () => Promise<Session<TAbi> | undefined>;
-  /** `hub.bumpSessionEpoch()`: every grant this user ever signed, for every app, dead at once. */
+  /**
+   * `hub.bumpSessionEpoch()`: every grant this user ever signed, for every app, dead on the base
+   * chain at once, and this client stops using them.
+   *
+   * Not an instant kill switch on a node, and not something to put behind a casual button: a
+   * node reads the epoch at the block its delegation was pinned to, so until the app owner
+   * reopens the delegation it keeps honouring the old grant for whoever holds the key (its
+   * expiry is the bound), and it refuses the user's next grant with `SessionEpochStaleError`
+   * — the user cannot play on that node until then. See `InterludeClient.revokeAll`.
+   */
   revoke: () => Promise<Hex | undefined>;
   /** Drop the key locally. The grant stays valid on chain until it expires. */
   discard: () => void;
 }
+
+/** A hook's `data`: the view's or the function's decoded return, once there is one. */
+type Returned<
+  TAbi extends Abi,
+  TMutability extends Writable | Readable,
+  TFunctionName extends ContractFunctionName<TAbi, TMutability>,
+> = ContractFunctionReturnType<TAbi, TMutability, TFunctionName>;
 
 /**
  * Hooks bound to one client, and therefore to one app's ABI.
@@ -66,7 +92,8 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
   const Context = createContext<UseSession<TAbi> | null>(null);
 
   function InterludeProvider(props: InterludeProviderProps) {
-    const { wallet, account, scope, anyFunction, expirySeconds, children } = props;
+    const { wallet, account, scope, anyFunction, expirySeconds, autoRenew, ensureChain, children } =
+      props;
 
     const [session, setSession] = useState<Session<TAbi> | null>(null);
     const [isRestoring, setRestoring] = useState(false);
@@ -79,10 +106,21 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
     const scopeKey = (scope ?? []).join(",");
     const scopeRef = useRef(scope);
     scopeRef.current = scope;
+    // Which granter the session in state belongs to, so an `open()` that resolves after the
+    // user switched accounts does not install the previous account's session.
+    const granterRef = useRef(granter);
+    granterRef.current = granter;
+    // When this provider signed each session it opened, so auto-renew knows the grant's whole
+    // lifetime. A restored session's is unknown: it was signed on an earlier visit.
+    const openedAt = useRef(new WeakMap<Session<TAbi>, number>());
 
     useEffect(() => {
+      // Whatever session was in state belongs to the previous account (or the previous scope).
+      // Keeping it while the new one restores would send the next call as the old user.
+      setSession(null);
+      setError(null);
       if (!granter) {
-        setSession(null);
+        setRestoring(false);
         return;
       }
 
@@ -111,31 +149,42 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
       };
     }, [granter, scopeKey, anyFunction]);
 
-    const open = useCallback(async () => {
-      if (!wallet) {
-        setError(new Error("connect a wallet before opening a session"));
-        return undefined;
-      }
+    const openWith = useCallback(
+      async (force: boolean) => {
+        if (!wallet) {
+          setError(new Error("connect a wallet before opening a session"));
+          return undefined;
+        }
 
-      setOpening(true);
-      setError(null);
-      try {
-        const opened = await client.openSession({
-          wallet,
-          ...(account !== undefined ? { account } : {}),
-          ...(scopeRef.current !== undefined ? { scope: scopeRef.current } : {}),
-          ...(anyFunction !== undefined ? { anyFunction } : {}),
-          ...(expirySeconds !== undefined ? { expirySeconds } : {}),
-        });
-        setSession(opened);
-        return opened;
-      } catch (cause) {
-        setError(asError(cause));
-        return undefined;
-      } finally {
-        setOpening(false);
-      }
-    }, [wallet, account, scopeKey, anyFunction, expirySeconds]);
+        const forGranter = granterRef.current;
+        setOpening(true);
+        setError(null);
+        try {
+          const opened = await client.openSession({
+            wallet,
+            ...(account !== undefined ? { account } : {}),
+            ...(scopeRef.current !== undefined ? { scope: scopeRef.current } : {}),
+            ...(anyFunction !== undefined ? { anyFunction } : {}),
+            ...(expirySeconds !== undefined ? { expirySeconds } : {}),
+            ...(ensureChain !== undefined ? { ensureChain } : {}),
+            ...(force ? { force } : {}),
+          });
+          if (granterRef.current?.toLowerCase() !== forGranter?.toLowerCase()) return undefined;
+          if (!openedAt.current.has(opened)) openedAt.current.set(opened, Date.now());
+          setSession(opened);
+          return opened;
+        } catch (cause) {
+          setError(asError(cause));
+          return undefined;
+        } finally {
+          setOpening(false);
+        }
+      },
+      // `scopeKey` stands in for `scope`, which is read through its ref.
+      [wallet, account, scopeKey, anyFunction, expirySeconds, ensureChain],
+    );
+
+    const open = useCallback(() => openWith(false), [openWith]);
 
     const revoke = useCallback(async () => {
       if (!wallet) return undefined;
@@ -153,6 +202,25 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
       session?.discard();
       setSession(null);
     }, [session]);
+
+    const renewBefore =
+      autoRenew === true ? 60 : autoRenew ? (autoRenew.beforeSeconds ?? 60) : undefined;
+    useEffect(() => {
+      if (renewBefore === undefined || !session) return;
+      const expiresAt = session.expiresAt.getTime();
+      let lead = renewBefore * 1000;
+      const signedAt = openedAt.current.get(session);
+      if (signedAt !== undefined) {
+        // A grant signed here, whose whole life is known. When `renewBefore` is most or all of
+        // it (`expirySeconds={30}` with the default 60 s), renewing that early is due the moment
+        // it is signed, and so is the next one: a wallet prompt after another. Renew halfway
+        // through its life instead.
+        lead = Math.min(lead, (expiresAt - signedAt) / 2);
+      }
+      const due = expiresAt - lead - Date.now();
+      const timer = setTimeout(() => void openWith(true), Math.max(0, due));
+      return () => clearTimeout(timer);
+    }, [session, renewBefore, openWith]);
 
     const value = useMemo<UseSession<TAbi>>(
       () => ({ session, isRestoring, isOpening, error, open, revoke, discard }),
@@ -179,20 +247,22 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
    * `onClick={() => move.send([3n])}` cannot produce an unhandled rejection. Use
    * `session.send` directly where a throw is wanted.
    */
-  function useSessionCall<
-    TFunctionName extends ContractFunctionName<TAbi, Writable>,
-    TArgs extends ContractFunctionArgs<TAbi, Writable, TFunctionName>,
-  >(functionName: TFunctionName) {
+  function useSessionCall<TFunctionName extends ContractFunctionName<TAbi, Writable>>(
+    functionName: TFunctionName,
+  ) {
+    type Result = Returned<TAbi, Writable, TFunctionName>;
     const { session } = useSession();
     const [state, setState] = useState<{
-      data: unknown;
+      data: Result | undefined;
       error: Error | null;
       isPending: boolean;
       latencyMs: number | undefined;
     }>({ data: undefined, error: null, isPending: false, latencyMs: undefined });
 
     const send = useCallback(
-      async (args?: TArgs) => {
+      async (
+        ...args: ArgsParameter<ContractFunctionArgs<TAbi, Writable, TFunctionName>>
+      ): Promise<SendResult<Result> | undefined> => {
         if (!session) {
           const error = new Error("no session is open: call open() first");
           setState((prior) => ({ ...prior, error, isPending: false }));
@@ -201,7 +271,7 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
 
         setState((prior) => ({ ...prior, isPending: true, error: null }));
         try {
-          const result = await session.send(functionName, args);
+          const result = await session.send(functionName, ...args);
           setState({
             data: result.result,
             error: null,
@@ -225,14 +295,22 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
     return { ...state, send, reset };
   }
 
-  /** A view call against the node's live state, optionally re-read on an interval. */
+  /**
+   * A view call against the node's live state, optionally re-read on an interval.
+   *
+   * `isLoading` is true only until the first value for these arguments arrives, so a poll does
+   * not flash a spinner every `pollMs`; `isFetching` is true whenever a read is in flight.
+   * `args` may be `undefined` while it is not known yet; pass `enabled: false` to hold the read.
+   */
   function useRead<
     TFunctionName extends ContractFunctionName<TAbi, Readable>,
     TArgs extends ContractFunctionArgs<TAbi, Readable, TFunctionName>,
   >(functionName: TFunctionName, args?: TArgs, options?: { pollMs?: number; enabled?: boolean }) {
-    const [data, setData] = useState<unknown>(undefined);
+    type Result = Returned<TAbi, Readable, TFunctionName>;
+    const [data, setData] = useState<Result | undefined>(undefined);
     const [error, setError] = useState<Error | null>(null);
     const [isLoading, setLoading] = useState(false);
+    const [isFetching, setFetching] = useState(false);
     const [tick, setTick] = useState(0);
 
     const key = stableKey(args);
@@ -240,25 +318,39 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
     const pollMs = options?.pollMs;
     const argsRef = useRef(args);
     argsRef.current = args;
+    // The key the data in state was read for. A new key is a new question, and it is loading
+    // until it has an answer; a repeat of the same one is only fetching.
+    const loadedKey = useRef<string | null>(null);
+    const request = useRef(0);
 
     useEffect(() => {
-      if (!enabled) return;
+      if (!enabled) {
+        setLoading(false);
+        setFetching(false);
+        return;
+      }
 
       let cancelled = false;
-      setLoading(true);
-      client
-        .read(functionName, argsRef.current)
+      const seq = ++request.current;
+      const identity = `${String(functionName)}:${key}`;
+      if (loadedKey.current !== identity) setLoading(true);
+      setFetching(true);
+      const read = client.read as unknown as (name: string, args?: unknown) => Promise<unknown>;
+      read(functionName, argsRef.current)
         .then((value) => {
-          if (!cancelled) {
-            setData(value);
-            setError(null);
-          }
+          if (cancelled || seq !== request.current) return;
+          loadedKey.current = identity;
+          setData(value as Result);
+          setError(null);
         })
         .catch((cause: unknown) => {
-          if (!cancelled) setError(asError(cause));
+          if (!cancelled && seq === request.current) setError(asError(cause));
         })
         .finally(() => {
-          if (!cancelled) setLoading(false);
+          if (!cancelled && seq === request.current) {
+            setLoading(false);
+            setFetching(false);
+          }
         });
 
       return () => {
@@ -273,7 +365,7 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
     }, [pollMs, enabled]);
 
     const refetch = useCallback(() => setTick((n) => n + 1), []);
-    return { data, error, isLoading, refetch };
+    return { data, error, isLoading, isFetching, refetch };
   }
 
   /**
@@ -282,12 +374,14 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
    * Enough for a status indicator, and the fastest way to find out whether a node is serving
    * the app a frontend thinks it is.
    */
-  function useNodeStatus(options?: { pollMs?: number }) {
+  function useNodeStatus(options?: { pollMs?: number; enabled?: boolean }) {
     const [status, setStatus] = useState<SessionStatus | null>(null);
     const [error, setError] = useState<Error | null>(null);
     const pollMs = options?.pollMs ?? 2000;
+    const enabled = options?.enabled ?? true;
 
     useEffect(() => {
+      if (!enabled) return;
       let cancelled = false;
 
       const poll = () => {
@@ -310,7 +404,7 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
         cancelled = true;
         clearInterval(timer);
       };
-    }, [pollMs]);
+    }, [pollMs, enabled]);
 
     return { status, error };
   }
@@ -318,29 +412,35 @@ export function createInterludeHooks<TAbi extends Abi>(client: InterludeClient<T
   /**
    * A view that updates when the node applies a call, not on a timer.
    *
-   * Same shape as `useRead`. Any function on the ABI. The socket is app-agnostic.
+   * Same shape as `useRead`. Any function on the ABI. The socket is app-agnostic, and every
+   * `useWatch` on a client shares it; hooks watching the same view share one read.
    */
   function useWatch<
     TFunctionName extends ContractFunctionName<TAbi, Readable>,
     TArgs extends ContractFunctionArgs<TAbi, Readable, TFunctionName>,
   >(functionName: TFunctionName, args?: TArgs, options?: { enabled?: boolean }) {
-    const [data, setData] = useState<unknown>(undefined);
+    type Result = Returned<TAbi, Readable, TFunctionName>;
+    const enabled = options?.enabled ?? true;
+    const [data, setData] = useState<Result | undefined>(undefined);
     const [error, setError] = useState<Error | null>(null);
-    const [isLoading, setLoading] = useState(true);
+    // Not loading when there is nothing to load: a disabled watch used to report `true` forever.
+    const [isLoading, setLoading] = useState(enabled);
 
     const key = stableKey(args);
-    const enabled = options?.enabled ?? true;
     const argsRef = useRef(args);
     argsRef.current = args;
 
     useEffect(() => {
-      if (!enabled) return;
+      if (!enabled) {
+        setLoading(false);
+        return;
+      }
       setLoading(true);
       const stop = client.watchRead(
         functionName,
         argsRef.current,
         (value) => {
-          setData(value);
+          setData(value as Result);
           setError(null);
           setLoading(false);
         },
@@ -377,7 +477,7 @@ function asError(cause: unknown): Error {
 
 /** Args as a dependency: `JSON.stringify` alone throws on the bigints an ABI call is full of. */
 function stableKey(args: unknown): string {
-  return JSON.stringify(args ?? null, (_key, value) =>
+  return JSON.stringify(args ?? null, (_key, value: unknown) =>
     typeof value === "bigint" ? value.toString() : value,
   );
 }

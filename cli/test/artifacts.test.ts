@@ -45,6 +45,8 @@ describe("finding Interlude's own artifacts", () => {
       expect(hub.bytecode.startsWith("0x")).toBe(true);
       expect(hub.bytecode.length).toBeGreaterThan(100);
       expect(hub.abi.some((item) => "name" in item && item.name === "commit")).toBe(true);
+      expect(hub.abi.some((item) => "name" in item && item.name === "bisect")).toBe(true);
+      expect(hub.abi.some((item) => "name" in item && item.name === "proveStep")).toBe(true);
     } finally {
       if (previous !== undefined) process.env.INTERLUDE_CONTRACTS_OUT = previous;
     }

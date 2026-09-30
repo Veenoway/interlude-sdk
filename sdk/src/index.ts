@@ -1,6 +1,7 @@
 export {
   DEFAULT_EXPIRY_SECONDS,
   createInterludeClient,
+  type ArgsParameter,
   type InterludeClient,
   type InterludeClientConfig,
   type OpenSessionOptions,
@@ -41,21 +42,58 @@ export {
 } from "./storage";
 
 export {
+  classifyNodeError,
   createNodeClient,
+  createSendClient,
+  createSendRouter,
+  SEND_SOCKET_REST_MS,
+  SEND_SOCKET_REST_MAX_MS,
+  getReceipt,
   interludeCommit,
+  interludeGetBatch,
   interludeSession,
+  waitSettled,
   sendCompatible,
   sendFast,
   succeeded,
   type InterludeReceipt,
   type NodeClient,
   type PendingDiff,
+  type SendRouter,
+  type ServedBatch,
   type SessionStatus,
+  type SettledStatus,
+  type WaitSettledOptions,
 } from "./transport";
 
-export { nodeSocketUrl, watchApplied, type AppliedCall, type AppliedLog } from "./watch";
+export {
+  createAppliedFeed,
+  nodeSocketUrl,
+  watchApplied,
+  type AppliedCall,
+  type AppliedFeed,
+  type AppliedLog,
+  type WatchOptions,
+} from "./watch";
 
 export { keyOf } from "./utils";
+
+export {
+  LAZER_DOMAIN,
+  lazerDigest,
+  signLazerReport,
+  type LazerReport,
+} from "./lazer";
+
+export {
+  DEFAULT_CONTROL_URL,
+  PUBLIC_DEMO_FLOORS,
+  nearestFloor,
+  type FloorTable,
+  type PublicFloor,
+} from "./near";
+
+export { roomAbi } from "./room-abi";
 
 export {
   AppRevertError,
@@ -68,9 +106,11 @@ export {
   MalformedSessionCallError,
   MalleableSessionSignatureError,
   NoActorError,
+  NodeBusyError,
   NodeUnreachableError,
   NotRegisteredError,
   PrivilegedSelectorError,
+  ResultUnavailableError,
   SelectorOutOfSessionScopeError,
   SessionAlreadyOpenError,
   SessionEpochStaleError,
@@ -78,8 +118,14 @@ export {
   SessionGranterIsZeroError,
   SessionKeyIsZeroError,
   SessionNotSignedByGranterError,
+  SessionRevokedError,
   SessionUnusableError,
+  SettlementLostError,
+  SettlementTimeoutError,
   UnrecognisedRevertError,
+  WriteOutsideDelegationError,
+  WrongChainError,
+  WrongNodeError,
   WrongSessionKeyError,
   decodeRevert,
   type RevertContext,

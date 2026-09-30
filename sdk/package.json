@@ -1,6 +1,6 @@
 {
   "name": "@interludelayer-sdk/sdk",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "description": "Open a session and send gasless, sub-millisecond transactions to an Interlude node.",
   "license": "MIT",
   "repository": {
@@ -34,15 +34,28 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./react": {
-      "types": "./dist/react.d.ts",
-      "import": "./dist/react.js",
-      "require": "./dist/react.cjs"
+      "import": {
+        "types": "./dist/react.d.ts",
+        "default": "./dist/react.js"
+      },
+      "require": {
+        "types": "./dist/react.d.cts",
+        "default": "./dist/react.cjs"
+      }
     }
+  },
+  "engines": {
+    "node": ">=20.9"
   },
   "scripts": {
     "prepublishOnly": "pnpm build",
@@ -50,7 +63,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "../../scripts/sdk-e2e.sh",
-    "example:agent": "node examples/agent-clock.mjs"
+    "example:agent": "node examples/agent-clock.mjs",
+    "example:try": "node examples/try.mjs"
   },
   "peerDependencies": {
     "react": ">=18",
@@ -64,7 +78,7 @@
   "devDependencies": {
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "jsdom": "^30.0.1",
+    "jsdom": "^26.1.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "tsup": "^8",

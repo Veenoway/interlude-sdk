@@ -1,0 +1,24 @@
+node_modules/
+.DS_Store
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+# Vendored from @interludelayer-sdk/cli by every `interlude` command (`npm run build` does it).
+# Regenerated, so not committed: the CLI version in contracts/package.json is what pins it.
+contracts/lib/interlude/
+# Written by `interlude ship` (what it deployed) and `interlude dev` (chain data and logs).
+contracts/.interlude/
+
+# Next.js
+web/.next/
+web/out/
+web/next-env.d.ts
+*.tsbuildinfo
+
+# Written by `interlude ship --out` and `interlude dev`. Public values (NEXT_PUBLIC_*), but
+# they name your deployment, and .env.example is the one to commit.
+.env
+.env.*
+!.env.example

@@ -6,45 +6,76 @@
  * a node is the same work every time, and none of it is the developer's problem.
  */
 
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createPublicClient, http, type Abi, type Address, type Hex } from "viem";
+import { abiCommand } from "./abi.js";
 import {
   ArtifactError,
-  compiledContracts,
   findInterludeOut,
   findProjectRoot,
   forgeBuild,
   readArtifact,
   readArtifactAt,
 } from "./artifacts.js";
-import { bootstrap, VALIDATOR_KEY, type Deployment } from "./bootstrap.js";
+import { bootstrap, FILL_IN, VALIDATOR_KEY, type Deployment } from "./bootstrap.js";
 import { ConfigError, parseConfig, substitute, type Config, type Placeholder } from "./config.js";
+import { mergeEnv } from "./env.js";
 import { generatedFileName, generateSurface, GENERATED_SUFFIX } from "./generate.js";
+import { NetworkError } from "./http.js";
 import { readSurface } from "./layout.js";
-import { onExit, startAnvil, startNode, stopAll } from "./processes.js";
+import { devPreflight, onExit, startAnvil, startNode, stopAll } from "./processes.js";
+import {
+  chooseContract,
+  delegatableContracts,
+  flag,
+  perKeyEvidence,
+  readToolchainWarnings,
+  REQUIRED_SOLC,
+  sourceDir,
+} from "./project.js";
 import { sessions } from "./sessions.js";
-import { ship } from "./ship.js";
+import { logs } from "./logs.js";
+import { ship, ShipError } from "./ship.js";
+import { status } from "./status.js";
 import { CONTRACTS_REMAPPING, ensureRemapping, findInterludeContracts } from "./remappings.js";
-import { starterConfig } from "./starter.js";
+import { firstHour, starterConfig } from "./starter.js";
 import { Bail, fail, note, ok, pairs, say, step, warn } from "./ui.js";
 import { checkRulesAgree, VerifyError, watchCommits } from "./verify.js";
 
-const USAGE = `interlude — run your contract on an ephemeral layer, locally
+const USAGE = `interlude — run your contract on an ephemeral layer, locally or hosted
 
-  interlude dev [--config <path>]     stand up a chain, a hub, a validator and a node
   interlude init [--contract <name>]  write a starter interlude.toml for this project
   interlude gen --contract <name>     generate the delegated surface from the storage layout
   interlude check                     fail if a generated surface no longer matches the layout
-  interlude ship [--contract <name>]  send us the bytecode; we deploy, pay, and give you a node
-  interlude sessions create <app>     ask for a node if the contract is already live
+  interlude ship [--owner 0x...] [--out .env.local] [--contract <name>] [--name <label>]
+                 [--region us|ny|eu|asia|sa|tokyo|mumbai|africa] [--again]
+                                      send us the bytecode, args and [[setup]]; we deploy,
+                                      pay, and give you a node
+  interlude abi [--contract <name>] [--out src/abi.ts]
+                                      the ABI as \`export const abi = [...] as const\`
+  interlude status <app> [--rpc <url>] [--node <url>]
+                                      owner, pending owner, delegation, epoch, node health
+  interlude sessions create <app> [--signature 0x...]
+                                      ask for a node for a contract that is already live;
+                                      one you delegated yourself needs its owner's opt-in
+  interlude sessions opt-in <app>     print what the owner signs for that, epoch included
   interlude sessions get <app>        look up an already-provisioned node
+  interlude logs --follow [--node <url>] [--abi <file>] [--json]
+                                      every call a node runs, as the node reports it;
+                                      exits 1 when it cannot be reached or will not stream
+  interlude dev [--config <path>]     stand up a chain, a hub, a validator and a node locally
 
 Options
   --config <path>     where interlude.toml is (default: ./interlude.toml)
   --contract <name>   which contract to work on
+  --name <label>      Fly machine name (default: the contract, or a prompt on a TTY)
+  --owner 0x...       ship: who owns the app afterwards (default: Interlude's deploy key)
+  --out <file>        ship: merge NEXT_PUBLIC_INTERLUDE_* into an env file; abi: where to write
+  --region <floor>    ship: where the hosted node sits. omit = nearest to whoever ships
   --no-build          skip forge build, and reason about whatever is in out/
   --force             let init write over an existing interlude.toml
+  --local             let init write a config for a per-key contract (dev only, not ship)
   --help              this
 
 Mark the storage a node should hold with a comment above each state variable:
@@ -54,9 +85,14 @@ Mark the storage a node should hold with a comment above each state variable:
 
 then \`interlude gen\`, and run \`interlude check\` in CI.
 
-Needs forge, cast and anvil on PATH: https://getfoundry.sh
+Needs forge, cast and anvil on PATH (https://getfoundry.sh), and solc >= ${REQUIRED_SOLC} with
+evm_version cancun or later — Interlude's contracts use transient storage.
   \`init\` writes the Foundry remapping for @interludelayer/contracts if it is missing.
 `;
+
+function wantsHelp(argv: string[]): boolean {
+  return argv.includes("--help") || argv.includes("-h");
+}
 
 async function main(argv: string[]): Promise<void> {
   const command = argv[0];
@@ -70,6 +106,9 @@ async function main(argv: string[]): Promise<void> {
   if (command === "check") return check(argv.slice(1));
   if (command === "sessions") return sessions(argv.slice(1));
   if (command === "ship") return ship(argv.slice(1));
+  if (command === "abi") return abiCommand(argv.slice(1));
+  if (command === "status") return status(argv.slice(1));
+  if (command === "logs") return logs(argv.slice(1));
   fail(`no command "${command}". Try: interlude --help`);
 }
 
@@ -89,8 +128,16 @@ async function dev(argv: string[]): Promise<void> {
   wireContracts(projectRoot);
   const interludeOut = findInterludeOut(projectRoot);
 
+  step("checking ports and the node binary before starting anything");
+  const binary = await devPreflight(
+    { chain: config.chain.port, node: config.node.port },
+    interludeCheckout(interludeOut),
+  );
+  note(`node binary ${binary}`);
+
   if (!argv.includes("--no-build")) {
     step("compiling");
+    for (const message of readToolchainWarnings(projectRoot)) warn(message);
     await forgeBuild(projectRoot);
     note(`forge build in ${projectRoot}`);
   }
@@ -128,7 +175,6 @@ async function dev(argv: string[]): Promise<void> {
   });
 
   step(`starting the node on ${config.node.port}`);
-  note("first run in a fresh checkout builds it, which takes a minute");
   await startNode({
     baseRpc,
     hub: deployment.hub,
@@ -140,7 +186,7 @@ async function dev(argv: string[]): Promise<void> {
     commitInterval: config.node.commitInterval,
     dataDir,
     logDir,
-    checkout: interludeCheckout(interludeOut),
+    binary,
   });
 
   const hubAbi = readArtifact(interludeOut, "InterludeHub").abi;
@@ -204,13 +250,7 @@ function report(
   ]);
 }
 
-/**
- * Merged into the env file rather than written over it.
- *
- * A project with more than one node — one per demo, on its own port — would otherwise lose the
- * other one's settings every time this ran, and that failure looks like the other demo breaking
- * on its own.
- */
+/** `[env]`, merged into the file it names — see `mergeEnv` for why merged. */
 function writeEnv(
   configPath: string,
   config: Config,
@@ -229,19 +269,12 @@ function writeEnv(
     $BASE_RPC: baseRpc,
     $NODE_RPC: nodeRpc,
   };
-
-  const ours = Object.entries(env.vars).map(
-    ([name, value]) => `${name}=${substitute(value, known)}`,
+  mergeEnv(
+    path,
+    Object.fromEntries(
+      Object.entries(env.vars).map(([name, value]) => [name, substitute(value, known)]),
+    ),
   );
-  const names = Object.keys(env.vars);
-  const kept = existsSync(path)
-    ? readFileSync(path, "utf8")
-        .split("\n")
-        .filter((line) => line.trim() !== "" && !names.some((name) => line.startsWith(`${name}=`)))
-    : [];
-
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, [...kept, ...ours, ""].join("\n"));
   note(`wrote ${path}`);
 }
 
@@ -261,6 +294,18 @@ function interludeCheckout(interludeOut: string): string {
  * cannot be fooled by an import alias or a base contract two levels up.
  */
 async function init(argv: string[]): Promise<void> {
+  if (wantsHelp(argv)) {
+    say(
+      `interlude init [--contract <name>] [--force] [--local]\n\n` +
+        `Write interlude.toml for a contract that inherits Delegatable.\n` +
+        `Exits 1 with a starter contract to copy while no contract under src/ inherits\n` +
+        `Delegatable yet — which includes a fresh \`forge init\` with only Counter.sol. That is\n` +
+        `expected: add the starter, run gen, then init --contract <name>.\n` +
+        `--local writes a config for a per-key contract, which \`dev\` can serve and \`ship\` cannot.`,
+    );
+    return;
+  }
+
   const projectRoot = findProjectRoot(process.cwd());
   const path = join(projectRoot, "interlude.toml");
   if (existsSync(path) && !argv.includes("--force")) {
@@ -270,43 +315,36 @@ async function init(argv: string[]): Promise<void> {
   // Remapping first. A project that does not inherit Delegatable yet cannot compile an
   // import of it, and a project that already does cannot compile without the remapping.
   // Either way the next step is forge build, so this has to happen here.
-  wireContracts(projectRoot);
+  const wired = wireContracts(projectRoot);
+
+  // Before forge: a pinned compiler too old for the vendored sources fails inside lib/interlude,
+  // and the setting to change is in foundry.toml, which the solc error never mentions.
+  const toolchain = readToolchainWarnings(projectRoot);
+  for (const message of toolchain) warn(message);
+  if (toolchain.length === 0) {
+    note(`Interlude's contracts need solc >= ${REQUIRED_SOLC} and evm_version cancun or later.`);
+  }
 
   step("compiling, to see what this project has");
   await forgeBuild(projectRoot);
 
-  const outDir = join(projectRoot, "out");
-  const candidates = compiledContracts(outDir)
-    // Sources only. `out/` also holds the mocks the tests deploy and every dependency's
-    // contracts, and offering those as candidates would be offering mostly noise.
-    .filter((contract) => contract.source.startsWith(`${sourceDir(projectRoot)}/`))
-    .filter((contract) =>
-      readArtifactAt(contract.artifactPath).abi.some(
-        (item) => item.type === "function" && item.name === "delegateAll",
-      ),
-    )
-    .sort((a, b) => a.name.localeCompare(b.name));
-
+  const candidates = delegatableContracts(projectRoot);
   if (candidates.length === 0) {
-    fail(firstHour(sourceDir(projectRoot)));
+    fail(firstHour(sourceDir(projectRoot), wired));
   }
 
-  const wanted = flag(argv, "--contract");
-  const chosen = wanted
-    ? candidates.find((contract) => contract.name === wanted)
-    : candidates.length === 1
-      ? candidates[0]
-      : undefined;
+  const chosen = chooseContract(candidates, flag(argv, "--contract"));
 
-  if (!chosen) {
-    // Choosing for the reader would be worse than asking. A config naming the wrong contract
-    // stands up a whole stack around it and fails somewhere that does not mention this decision.
-    const list = candidates.map((c) => `  ${c.name.padEnd(20)} ${c.source}`).join("\n");
+  const perKey = perKeyEvidence(projectRoot, chosen);
+  if (perKey.length > 0 && !argv.includes("--local")) {
     fail(
-      wanted
-        ? `no delegatable contract named ${wanted}. This project has:\n${list}`
-        : `this project has ${candidates.length} delegatable contracts, so which one a node ` +
-            `should serve is yours to say:\n${list}\n\n  interlude init --contract <name>`,
+      `${chosen.name} hands storage over per key (${perKey.join("; ")}).\n` +
+        `The hosted node — what \`ship\` gives you — serves the whole contract as one partition ` +
+        `(GLOBAL) and nothing else, so every keyed write would be refused after a deploy that ` +
+        `looked fine. Mark the variables "/// @custom:interlude global" and run ` +
+        `\`interlude gen --contract ${chosen.name}\` again.\n` +
+        `To serve one key on your laptop with \`interlude dev\` anyway: interlude init --contract ` +
+        `${chosen.name} --local`,
     );
   }
 
@@ -314,14 +352,25 @@ async function init(argv: string[]): Promise<void> {
   const constructor = artifact.abi.find((item) => item.type === "constructor");
   const inputs = constructor && "inputs" in constructor ? constructor.inputs : [];
 
-  writeFileSync(path, starterConfig(chosen.name, chosen.source, inputs));
+  const written = starterConfig(chosen.name, chosen.source, inputs, { perKey: perKey.length > 0 });
+  writeFileSync(path, written);
 
   ok(`wrote ${path} for ${chosen.name}`);
-  if (inputs.some((input) => input.type !== "address")) {
-    note("Fill in the constructor arguments it could not guess, then run: interlude dev");
-  } else {
-    note("Now run: interlude dev");
+  const unfinished = parseConfig(written, path).app.args.filter((arg) => FILL_IN.test(arg));
+  if (unfinished.length > 0) {
+    note(
+      `${unfinished.length} constructor argument(s) are marked <fill in: ...> in interlude.toml. ` +
+        `Replace them: ship sends them as written, and ship and dev both refuse the marker.`,
+    );
   }
+  if (perKey.length > 0) {
+    note(`per-key: set delegate to the 32-byte key to serve, then: interlude dev`);
+  } else {
+    note(
+      "Now run: npx @interludelayer-sdk/cli ship --owner <your address> --out .env.local",
+    );
+  }
+  note("interlude dev is the laptop loop. The published CLI does not ship the node binary.");
 }
 
 // --- gen and check ---------------------------------------------------------
@@ -334,6 +383,11 @@ async function init(argv: string[]): Promise<void> {
  * how the project arranges its dependencies.
  */
 async function gen(argv: string[]): Promise<void> {
+  if (wantsHelp(argv)) {
+    say(`interlude gen --contract <name>\n\nWrite <Name>InterludeSurface.sol beside the source.`);
+    return;
+  }
+
   const projectRoot = findProjectRoot(process.cwd());
   wireContracts(projectRoot);
   const contract = flag(argv, "--contract");
@@ -362,19 +416,33 @@ async function gen(argv: string[]): Promise<void> {
   writeFileSync(target, generateSurface(surface, appSource));
 
   ok(`wrote ${target}`);
+  if (surface.variables.some((variable) => variable.mode === "per-key")) {
+    warn(
+      `per-key storage is for \`interlude dev\` only: ship serves the whole contract (GLOBAL), ` +
+        `and init and ship refuse a per-key surface. Use "global" to ship this.`,
+    );
+  }
   const generatedName = `${contract}${GENERATED_SUFFIX}`;
   const generatedImport = `./${generatedFileName(contract)}`;
-  note(`Now inherit it and register once, in the constructor:`);
+  note(`Now inherit it and register once, in the constructor.`);
+  note(`Keep the Delegatable import — the constructor still names Delegatable(hub_).`);
   say("");
+  say(`  import {Delegatable} from "${CONTRACTS_REMAPPING}Delegatable.sol";`);
+  say(`  import {IInterludeHub} from "${CONTRACTS_REMAPPING}interfaces/IInterludeHub.sol";`);
+  say(`  import {Types} from "${CONTRACTS_REMAPPING}interfaces/Types.sol";`);
   say(`  import {${generatedName}} from "${generatedImport}";`);
   say("");
   say(`  contract ${contract} is ${generatedName} {`);
   say(`      constructor(IInterludeHub hub_) Delegatable(hub_) {`);
   say(`          _registerInterludeSurface();`);
   say(`      }`);
+  say("");
+  say(`      // Seeding or repairing delegated state from the base chain: guard it.`);
+  say(`      // function credit(...) external onlyOwner whenNotDelegated(Types.GLOBAL) { ... }`);
   say(`  }`);
   say("");
-  note(`Then run interlude check in CI, so a layout change cannot pass unnoticed.`);
+  note(`Then: npx @interludelayer-sdk/cli init --contract ${contract}`);
+  note(`Put npx @interludelayer-sdk/cli check in CI, so a layout change cannot pass unnoticed.`);
 }
 
 /**
@@ -386,6 +454,11 @@ async function gen(argv: string[]): Promise<void> {
  * hand a node the wrong storage, and nothing at runtime would object until a commit did.
  */
 async function check(argv: string[]): Promise<void> {
+  if (wantsHelp(argv)) {
+    say(`interlude check\n\nFail if a generated surface no longer matches solc's layout.`);
+    return;
+  }
+
   const projectRoot = findProjectRoot(process.cwd());
   wireContracts(projectRoot);
 
@@ -455,68 +528,57 @@ function findGenerated(dir: string): { contract: string; path: string }[] {
  *
  * Missing sources are a warning rather than a hard stop: a project that already imports
  * Delegatable via a relative path still compiles, and shouting about a remapping it does
- * not need would be the worse first impression.
+ * not need would be the worse first impression. Returns whether the remapping is in place,
+ * so nothing later claims it was written when it was not.
  */
-function wireContracts(projectRoot: string): void {
+function wireContracts(projectRoot: string): boolean {
   try {
     const contractsDir = findInterludeContracts(projectRoot);
     const mapping = ensureRemapping(projectRoot, contractsDir);
     if (mapping.wrote) {
       ok(`wrote ${mapping.line} into ${mapping.path}`);
     }
+    return true;
   } catch (error) {
     if (error instanceof ArtifactError) {
       warn(error.message);
-      return;
+      return false;
     }
     throw error;
   }
 }
 
 /**
- * The first hour, printed by `init` when the project has not inherited Delegatable yet.
- *
- * This used to be one sentence about `delegateAll()`. The reader who sees it has just been
- * given a remapping and does not yet have a contract that uses it, so the next lines they
- * need are the import, the annotation, `gen`, and `ship` — not a reminder of the ABI.
+ * Errors that carry a sentence for the reader. Anything else is a bug in this command, and even
+ * then a stack is only useful to whoever fixes it — so it is printed on request.
  */
-function firstHour(src: string): string {
+function explainTopLevel(error: unknown): string {
+  if (
+    error instanceof ConfigError ||
+    error instanceof ArtifactError ||
+    error instanceof VerifyError ||
+    error instanceof NetworkError ||
+    error instanceof ShipError
+  ) {
+    return error.message;
+  }
+  // viem's own errors carry a one-line summary and the EVM's reason; the full message adds the
+  // whole request body, which for a deploy is kilobytes of bytecode between the reader and why.
+  const viem = error as { shortMessage?: string; details?: string } | null;
+  if (viem?.shortMessage && !process.env["INTERLUDE_DEBUG"]) {
+    return (
+      `${viem.shortMessage}${viem.details ? `\n  ${viem.details}` : ""}\n\n` +
+      `INTERLUDE_DEBUG=1 prints the full request and stack.`
+    );
+  }
+  const message = error instanceof Error ? error.message : String(error);
   return (
-    `nothing under ${src}/ inherits Delegatable yet. The remapping is written; ` +
-    `the import it resolves is:\n\n` +
-    `  import {Delegatable} from "${CONTRACTS_REMAPPING}Delegatable.sol";\n` +
-    `  import {IInterludeHub} from "${CONTRACTS_REMAPPING}interfaces/IInterludeHub.sol";\n` +
-    `  import {Types} from "${CONTRACTS_REMAPPING}interfaces/Types.sol";\n\n` +
-    `  contract YourApp is Delegatable {\n` +
-    `      /// @custom:interlude global\n` +
-    `      uint256 internal score;\n\n` +
-    `      constructor(IInterludeHub hub_) Delegatable(hub_) {}\n\n` +
-    `      function play() external whenNotDelegated(Types.GLOBAL) {\n` +
-    `          score += 1;\n` +
-    `      }\n` +
-    `  }\n\n` +
-    `Then inherit the generated surface, register it, and come back:\n\n` +
-    `  interlude gen --contract YourApp\n` +
-    `  interlude init --contract YourApp\n` +
-    `  interlude check\n` +
-    `  interlude ship\n\n` +
-    `ship sends us the bytecode. We deploy, pay, and print a node URL. ` +
-    `Nothing to set. dev is the laptop loop and needs an interlude-node binary, ` +
-    `which the published CLI does not ship.`
+    `${message}\n\n` +
+    (process.env["INTERLUDE_DEBUG"]
+      ? `${(error as Error)?.stack ?? ""}`
+      : `This looks like a bug in the CLI. INTERLUDE_DEBUG=1 prints the stack; please include it ` +
+        `in an issue.`)
   );
-}
-
-/** Foundry's source directory, which a project may have renamed. */
-function sourceDir(projectRoot: string): string {
-  const config = join(projectRoot, "foundry.toml");
-  if (!existsSync(config)) return "src";
-  const found = /^\s*src\s*=\s*["']([^"']+)["']/m.exec(readFileSync(config, "utf8"));
-  return found?.[1]?.replace(/\/$/, "") ?? "src";
-}
-
-function flag(argv: string[], name: string): string | undefined {
-  const at = argv.indexOf(name);
-  return at === -1 ? undefined : argv[at + 1];
 }
 
 main(process.argv.slice(2))
@@ -526,15 +588,8 @@ main(process.argv.slice(2))
     if (error instanceof Bail) {
       process.exit(1);
     }
-    if (
-      error instanceof ConfigError ||
-      error instanceof ArtifactError ||
-      error instanceof VerifyError
-    ) {
-      process.stderr.write(`\nerror ${error.message}\n`);
-      process.exit(1);
-    }
-    throw error;
+    process.stderr.write(`\nerror ${explainTopLevel(error)}\n`);
+    process.exit(1);
   });
 
 // Referenced by the report and the node's partition argument, and kept out of the config module
