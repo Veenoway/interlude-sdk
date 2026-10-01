@@ -68,6 +68,25 @@ const FIRST_WAIT_MS = 250;
 const MAX_WAIT_MS = 30_000;
 const DEFAULT_FALLBACK_MS = 1000;
 
+/**
+ * Said once per process, the first time a listener with nothing to poll subscribes where there
+ * is no `WebSocket`. Node 20 has none unless started with `--experimental-websocket`, and there
+ * the feed cannot open at all: `watchRead` still moves because it polls its view, but a bare
+ * `watch()` callback would never run, with nothing to say why.
+ */
+let warnedNoWebSocket = false;
+
+function warnNoWebSocket(): void {
+  if (warnedNoWebSocket) return;
+  warnedNoWebSocket = true;
+  console.warn(
+    "@interludelayer-sdk/sdk: watch() needs a global WebSocket, and this runtime has none " +
+      "(Node 20 without --experimental-websocket), so its callback will never run. " +
+      "Use Node 22 or later, or set globalThis.WebSocket from the ws package before calling it. " +
+      "watchRead() and useWatch poll their view instead.",
+  );
+}
+
 type Phase = "idle" | "connecting" | "live" | "down" | "unsupported";
 
 interface Listener {
@@ -227,6 +246,7 @@ export function createAppliedFeed(nodeUrl: string): AppliedFeed {
         ...(options?.fallback ? { fallback: options.fallback } : {}),
       };
       listeners.add(listener);
+      if (!listener.fallback && typeof WebSocket === "undefined") warnNoWebSocket();
       if (polling()) startFallback(listener);
       if (socket === null && retry === undefined && phase !== "unsupported") open();
 

@@ -1,7 +1,7 @@
 {
   "name": "create-interlude-app",
-  "version": "0.1.1",
-  "description": "Scaffold a Foundry + Next.js project whose contract runs on an Interlude node: one wallet signature, then gasless sub-millisecond calls that settle on Monad.",
+  "version": "0.1.2",
+  "description": "Scaffold a Foundry + Next.js project whose contract runs on an Interlude node: one wallet signature, then gasless calls (a few ms next to the node, ~40 ms round trip) that settle on Monad.",
   "license": "MIT",
   "repository": {
     "type": "git",

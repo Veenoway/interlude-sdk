@@ -80,7 +80,7 @@ export function run(argv, io) {
   io.out(`  cd ${cd}/contracts`);
   io.out("  npm i");
   io.out("  npm run build        # vendors Interlude's contracts, compiles, checks the surface");
-  io.out("  npx interlude ship --owner <your address> --out ../web/.env.local");
+  io.out("  npx @interludelayer-sdk/cli ship --owner <your address> --out ../web/.env.local");
   io.out("  cd ../web && npm i && npm run dev");
   io.out("");
   io.out("Needs Foundry (forge) on PATH: https://getfoundry.sh. README.md explains what you");

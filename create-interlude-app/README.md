@@ -12,22 +12,28 @@ Then, from the project's README:
 cd my-app/contracts
 npm i
 npm run build
-npx interlude ship --owner <your address> --out ../web/.env.local
+npx @interludelayer-sdk/cli ship --owner <your address> --out ../web/.env.local
 cd ../web && npm i && npm run dev
 ```
 
 That is a contract deployed on Monad testnet, delegated to a node, and a page where one wallet
-signature opens a session and every click after it is a gasless call answered in about a
-millisecond, then settled on Monad a few seconds later.
+signature opens a session and every click after it is a gasless call answered in one round trip
+(a few ms next to the node, ~40 ms over the network), then settled on Monad a few seconds later.
+
+Call the CLI by its scoped name, `npx @interludelayer-sdk/cli`: inside `contracts/` that runs
+the copy `npm i` installed there. A bare `npx interlude` anywhere else fetches an unrelated npm
+package of that name.
 
 ## On npm, or from the repository
 
-The generated project depends on `@interludelayer-sdk/cli@^0.2.1` (`contracts/`) and
-`@interludelayer-sdk/sdk@^0.2.1` (`web/`). Both are on npm, and so is `create-interlude-app`
-itself. The ranges are `^0.2.1` on purpose: a `^0.1` range would quietly install the old CLI
+The generated project depends on `@interludelayer-sdk/cli@^0.2.2` (`contracts/`) and
+`@interludelayer-sdk/sdk@^0.2.2` (`web/`). Both are on npm, and so is `create-interlude-app`
+itself. The ranges are `^0.2.2` on purpose: a `^0.1` range would quietly install the old CLI
 (up to 0.1.6), which ignores `ship --owner/--out` (the app stays owned by Interlude's deploy key
 and no env file is written), and the old SDK (up to 0.1.3), which can send a call twice when a
-response is lost; `^0.2.0` would accept 0.2.0, whose CLI bundles the hub from before v3.
+response is lost; `^0.2.0` would accept 0.2.0, whose CLI bundles the hub from before v3; and
+`^0.2.1` would accept 0.2.1, whose `gen` sends a project that already has `interlude.toml` to an
+`init` that refuses to run.
 
 Release order for the maintainer: publish `@interludelayer-sdk/sdk` and
 `@interludelayer-sdk/cli` (both `prepublishOnly` scripts build; the CLI's also re-bundles
@@ -45,8 +51,8 @@ mkdir -p /tmp/interlude-packs
 (cd packages/cli && npm pack --pack-destination /tmp/interlude-packs)
 
 node packages/create-interlude-app/bin/create-interlude-app.js ~/my-app
-cd ~/my-app/contracts && npm i -D /tmp/interlude-packs/interludelayer-sdk-cli-0.2.1.tgz
-cd ../web && npm i /tmp/interlude-packs/interludelayer-sdk-sdk-0.2.1.tgz
+cd ~/my-app/contracts && npm i -D /tmp/interlude-packs/interludelayer-sdk-cli-0.2.2.tgz
+cd ../web && npm i /tmp/interlude-packs/interludelayer-sdk-sdk-0.2.2.tgz
 ```
 
 The CLI tarball carries the Solidity sources and artifacts committed under `packages/cli`.
@@ -69,10 +75,12 @@ layout (`npm run gen` regenerates it, `npm run check` proves it matches), every 
 its constructor takes only the hub, so `ship` needs no arguments. Each of those lines is
 commented with why it is there.
 
-`web/` connects an injected wallet, moves it to the base chain, opens a session scoped to
-`click`, shows your count before the node answers, the round-trip latency, the live total
-through `useWatch`, and when Monad has caught up, click by click, through
-`waitSettled({ hash })` (which also says so when a restarted node lost a click). It reads
+`web/` checks that the node serves the configured app (`status().app`, so a node URL from
+somewhere else is an error on load rather than a quiet 0), connects an injected wallet, moves it
+to the base chain, opens a session scoped to `click`, shows your count before the node answers,
+the round-trip latency, the live total through `useWatch`, and when Monad has caught up, click
+by click, through `waitSettled({ hash })` (which also says so when a restarted node lost a
+click). It reads
 `NEXT_PUBLIC_INTERLUDE_APP`, `NEXT_PUBLIC_INTERLUDE_NODE` and `NEXT_PUBLIC_INTERLUDE_BASE_RPC`,
 the names `interlude ship --out` writes.
 

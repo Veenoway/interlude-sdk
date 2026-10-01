@@ -33,7 +33,7 @@ public printer key means anyone can sign the price a fill or a mark settles at.
 ## Before you start
 
 - **Choose the new resolver.** A multisig is right (a Safe with two or three signers who are not
-  the validator's operators). An EOA whose key lives offline is acceptable for the hackathon. It
+  the validator's operators). An EOA whose key lives offline is acceptable on testnet. It
   must not be the validator, and it must not be any anvil account (the script refuses both).
 - **Hold the two keys that sign.** The hub admin (`cast call $HUB 'admin()(address)'`) and the
   validator (`defaultValidator()`). On the live deployment these are the same key. Nothing here

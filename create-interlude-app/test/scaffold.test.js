@@ -175,7 +175,9 @@ describe("the bin", () => {
     expect(out.status, out.stderr).toBe(0);
     expect(out.stdout).toContain("Created space-game");
     expect(out.stdout).toContain("cd 'Space Game'/contracts");
-    expect(out.stdout).toContain("npx interlude ship --owner <your address> --out ../web/.env.local");
+    expect(out.stdout).toContain(
+      "npx @interludelayer-sdk/cli ship --owner <your address> --out ../web/.env.local",
+    );
     expect(existsSync(join(cwd, "Space Game", "contracts", "src", "Clicker.sol"))).toBe(true);
   });
 

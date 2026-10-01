@@ -4,6 +4,7 @@ Send us the bytecode. We deploy it, we pay, we run the node.
 
 ```sh
 cd my-foundry-project
+npm i -D @interludelayer-sdk/cli
 npx @interludelayer-sdk/cli init        # exits 1 until a contract inherits Delegatable — expected
 npx @interludelayer-sdk/cli gen --contract YourApp
 # import {YourAppInterludeSurface} from "./YourAppInterludeSurface.sol";
@@ -13,6 +14,11 @@ npx @interludelayer-sdk/cli ship --owner 0xYourWallet --out .env.local
 npx @interludelayer-sdk/cli abi --out src/abi.ts
 npx @interludelayer-sdk/cli status 0xYourApp
 ```
+
+Install it in the Foundry project, and the SDK (`npm i @interludelayer-sdk/sdk viem`) in the
+frontend: two packages, two folders. Call the CLI by its scoped name, as above. Inside the
+project, `npx @interludelayer-sdk/cli` runs the copy you installed; a bare `npx interlude` in a
+folder that has not installed it fetches an unrelated npm package called `interlude`.
 
 Your project needs **solc 0.8.28 or later and `evm_version` cancun or later**: the vendored
 contracts use transient storage (`tstore`). A fresh `forge init` is fine as it is; `init` warns
@@ -101,9 +107,9 @@ was redeployed and forgot it), the address `owner()` returns signs an EIP-191 me
 app and the hub session's epoch:
 
 ```sh
-interlude sessions opt-in 0xYourApp        # prints the message, with the epoch read from the hub
+npx @interludelayer-sdk/cli sessions opt-in 0xYourApp   # prints the message, epoch included
 cast wallet sign --interactive "interlude:provision:0xyourapp:<epoch>"
-interlude sessions create 0xYourApp --signature 0x...
+npx @interludelayer-sdk/cli sessions create 0xYourApp --signature 0x...
 ```
 
 `sessions create` without `--signature` prints the same thing when control answers that an
@@ -163,11 +169,14 @@ Node 20 and later: the socket is the `ws` package, which viem already depends on
 
 ## `dev`
 
-`dev` is the laptop loop (anvil, a hub, a validator, a node on loopback). A built
-`interlude-node` is not bundled, so set `INTERLUDE_NODE_BIN` outside a checkout. You do not need
-that binary to `ship`. Before compiling or starting anything, `dev` checks that both ports are
-free and that the node binary exists. anvil runs with `--disable-code-size-limit`: the hub is
-over EIP-170's 24 KB, as Monad allows and a stock anvil does not.
+`dev` is the laptop loop (anvil, a hub, a validator, a node on loopback). It needs an
+`interlude-node` binary, which is not published: this package does not carry it, and neither
+does the `interlude-sdk` repository. Outside an Interlude checkout, set `INTERLUDE_NODE_BIN` to
+one you have, or skip `dev`: `ship` needs no binary, and the SDK's `examples/try.mjs` runs
+against a public floor with nothing to install but the SDK. Before compiling or starting
+anything, `dev` checks that both ports are free and that the node binary exists. anvil runs with
+`--disable-code-size-limit`: the hub is over EIP-170's 24 KB, as Monad allows and a stock anvil
+does not.
 
 The hub artifact and the Solidity a contract inherits (`Delegatable`, `Types`) are bundled,
 including `bisect` / `proveStep` / `BisectGame`. The hub is v3: the same code as the hub live

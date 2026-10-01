@@ -1,6 +1,19 @@
 # @interludelayer-sdk/sdk
 
-## Unreleased
+## 0.2.2
+
+- **`watch()` says when it cannot run.** It needs a global `WebSocket`, and Node 20 has none
+  unless started with `--experimental-websocket`. There the feed could not open, and since a
+  bare `watch()` has no view to poll, its callback never ran and nothing said why (Node 20 is
+  inside `engines`). The first `watch()` on such a runtime now prints one `console.warn` naming
+  the fix: Node 22 or later, or `globalThis.WebSocket` from the `ws` package. `watchRead` and
+  `useWatch`, which poll their view meanwhile, stay quiet. The README and `watch`'s doc comment
+  say the same.
+- The npm description gives the measured latency, a few ms next to the node and ~40 ms round
+  trip, where it said "sub-millisecond": the engine alone on a laptop, not a call over the
+  network.
+
+## 0.2.1
 
 - **A socket that loses a send is tried again.** A delivery the WebSocket lost is still resent
   over HTTP (the same signed bytes, once the node has said it never saw them), but sends no longer
@@ -11,9 +24,6 @@
   replaces is closed, except the first, which the reads share. One send that arrives over the
   socket resets the rest. `createSendRouter` is the policy on its own; a `transport` of the app's
   own is used as before, for everything.
-
-## 0.2.1
-
 - **The public floors are the v3 ones.** `PUBLIC_DEMO_FLOORS`, and so `nearestFloor()` with its
   default table, name the eight public Rooms on hub v3
   ([`0x98922c6E…C43e`](https://testnet.monadscan.com/address/0x98922c6E5e4Bea62761C71D2401c7ec2c26eC43e)),

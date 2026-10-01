@@ -12,9 +12,10 @@ import {ClickerInterludeSurface} from "./ClickerInterludeSurface.sol";
 ///
 ///         Once delegated, the node holds `clicks` and `total`. A click is a transaction on the
 ///         node, signed by a session key the user granted once, with no gas and no wallet
-///         prompt, answered in about a millisecond. The node commits the resulting storage
-///         diffs back to this same contract on Monad every few seconds, under a validator's
-///         signature and bond, where anyone can challenge them.
+///         prompt, answered in one round trip: a few ms next to the node, ~40 ms over the
+///         network. The node commits the resulting storage diffs back to this same contract on
+///         Monad every few seconds, under a validator's signature and bond, where anyone can
+///         challenge them.
 ///
 /// @dev The five Interlude lines, and why each is there:
 ///

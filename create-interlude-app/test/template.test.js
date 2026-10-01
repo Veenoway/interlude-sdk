@@ -71,9 +71,9 @@ describe("contracts/", () => {
     );
     expect(pkg.scripts.gen).toBe("interlude gen --contract Clicker");
     expect(pkg.scripts.abi).toBe("interlude abi --contract Clicker --out ../web/lib/abi.ts");
-    // Exactly ^0.2.1: 0.1.x on npm ignores --owner/--out, 0.2.0 bundles the hub before v3, and a
-    // 0.x caret never crosses minors.
-    expect(pkg.devDependencies["@interludelayer-sdk/cli"]).toBe("^0.2.1");
+    // Exactly ^0.2.2: 0.1.x on npm ignores --owner/--out, 0.2.0 bundles the hub before v3, 0.2.1's
+    // gen sends a configured project to an init that refuses, and a 0.x caret never crosses minors.
+    expect(pkg.devDependencies["@interludelayer-sdk/cli"]).toBe("^0.2.2");
     expect(pkg.engines.node).toBe(">=20.9");
   });
 });
@@ -103,6 +103,20 @@ describe("web/", () => {
     expect(app).toContain("instanceof SettlementLostError");
   });
 
+  it("asks the node which app it serves before anything else, and stops on another one", () => {
+    // A node URL from somewhere else used to show a quiet 0 until the first click failed.
+    const app = read("web/components/clicker-app.tsx");
+    expect(app).toContain("await interlude.status()");
+    expect(app).toContain("status.app.toLowerCase() === config.app.toLowerCase()");
+    expect(app).toContain("if (node.wrongNode) return <Setup problem={node.wrongNode} />;");
+  });
+
+  it("keeps Next's agentRules off without naming any one tool's instruction files", () => {
+    const nextConfig = read("web/next.config.ts");
+    expect(nextConfig).toMatch(/^\s*agentRules: false,$/m);
+    expect(nextConfig).not.toMatch(/CLAUDE|AGENTS/);
+  });
+
   it("scopes the session to click, the only writer", () => {
     expect(read("web/lib/interlude.ts")).toContain('export const SCOPE = ["click"] as const;');
   });
@@ -122,7 +136,7 @@ describe("web/", () => {
     const pkg = json("web/package.json");
     // ^0.1.3 resolved to npm's 0.1.3, which predates the audit fixes (double sends on a lost
     // response, a waitSettled that could not notice a lost call). A 0.x caret stays in its minor.
-    expect(pkg.dependencies["@interludelayer-sdk/sdk"]).toBe("^0.2.1");
+    expect(pkg.dependencies["@interludelayer-sdk/sdk"]).toBe("^0.2.2");
     expect(pkg.dependencies.viem).toMatch(/^\^2\.(2[1-9]|[3-9]\d)\./);
     expect(pkg.engines.node).toBe(">=20.9");
 
@@ -131,6 +145,28 @@ describe("web/", () => {
     const kandle = JSON.parse(readFileSync(kandlePath, "utf8"));
     for (const name of ["next", "react", "react-dom"]) {
       expect(pkg.dependencies[name], name).toBe(kandle.dependencies[name]);
+    }
+  });
+});
+
+describe("what it promises", () => {
+  // The Performance page's figures: a few ms next to the node, ~40 ms round trip. The engine
+  // alone answers in 228 µs on a laptop, which is not what a click over the network takes.
+  const copy = [
+    "README.md",
+    "contracts/src/Clicker.sol",
+    "web/components/clicker-app.tsx",
+  ];
+  it("states the measured latency, never a sub-millisecond one", () => {
+    for (const file of copy) {
+      expect(read(file), file).not.toMatch(/sub-millisecond|in (about )?a millisecond/i);
+    }
+    expect(read("README.md")).toMatch(/a few ms next to the node, ~40 ms over the\s+network/);
+  });
+
+  it("calls the CLI by its scoped name: a bare `npx interlude` is somebody else's package", () => {
+    for (const file of [...copy, "web/.env.example"]) {
+      expect(read(file), file).not.toMatch(/npx interlude (init|gen|check|ship|abi|status|sessions|logs|dev)\b/);
     }
   });
 });

@@ -1,7 +1,7 @@
 {
   "name": "@interludelayer-sdk/cli",
-  "version": "0.2.1",
-  "description": "Stand up a local Interlude stack against your own Foundry project with one command.",
+  "version": "0.2.2",
+  "description": "Generate, check and ship a Delegatable contract to a hosted Interlude node on Monad testnet.",
   "license": "MIT",
   "repository": {
     "type": "git",

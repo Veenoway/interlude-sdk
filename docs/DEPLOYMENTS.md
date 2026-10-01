@@ -14,7 +14,7 @@ permissioned phase ("v1 is a curated set"), which all three hubs belong to.
 | Hub v3 | [`0x98922c6E5e4Bea62761C71D2401c7ec2c26eC43e`](https://testnet.monadscan.com/address/0x98922c6E5e4Bea62761C71D2401c7ec2c26eC43e), deployed at block 66269347 (2026-09-28 00:34 UTC) |
 | Its bytecode | `packages/contracts/src/InterludeHub.sol` as of commit `ec48f1b`, built with the repo's `foundry.toml` (solc 0.8.28, 200 optimizer runs): the runtime code on chain is byte for byte `forge build`'s `deployedBytecode`. Built from any later commit up to b492b59 the bytes are the same, metadata hash included: the six files the hub compiles from have not changed since `ec48f1b`. Verified on MonadScan and Sourcify ([Source verification](#source-verification)) |
 | Admin | `0xB28E684815b095aB5Fb324214cfEa63d76F3d691` (`allowValidator`, `allowResolver`) |
-| Validator | `0xa375CF27eD39491dB8302Ffc3dF4210Ad263eF43`, the hub's `defaultValidator`: bond 3.2 MON, 2.6 MON of it reserved by 26 live delegations (of the 32 its terms allow) |
+| Validator | `0xa375CF27eD39491dB8302Ffc3dF4210Ad263eF43`, the hub's `defaultValidator`: bond 12.8 MON, 2.6 MON of it reserved by 26 live delegations (of the 128 its terms allow since 2026-10-01; room for 102 more) |
 | Bench | `committeeOf(0xa375…eF43)` returns judges A and B at threshold 2. A session copies this bench when it opens: the cold resolver plus A and B, two votes of three to settle a dispute. The validator set it at block 66886352 (2026-09-30 05:19 UTC); sessions opened before keep the cold resolver alone ([below](#which-bench-a-session-sits-on)) |
 | Cold resolver | `0x3dd6202F995EFbAAA1a0Ddc413e46f72f96E147E`, the terms' `resolver`: a dedicated key, neither the validator nor the admin |
 | Judge A | `0x895182c2A7cF64b24e98956039A89257C0dDc918`, a bot, Fly app `interlude-judge-a` (`cdg`). It reads Monad through `testnet-rpc.monad.xyz` |
@@ -35,7 +35,7 @@ The validator's terms, as `termsOf(0xa375…eF43)` returns them:
 | `challengeWindow` | 3600 s | How long the app stays locked after a session ends, before `releaseStake` |
 | `resolutionWindow` | 1800 s | The clock of each dispute move: every bisection move, and the judges' vote, lands within this of the previous one |
 | `maxDiffsPerCommit` | 256 | The most slots one batch may change (also the hub's own ceiling) |
-| `maxDelegations` | 32 | Sessions this validator holds at once |
+| `maxDelegations` | 128 | Sessions this validator holds at once (32 until 2026-10-01; each one reserves 0.1 MON of the bond) |
 | `timeoutPenaltyBps` | 2000 | 20 % of a challenger's bond goes to the app's beneficiary when the judges time out |
 | `spec` | `MonadTen` | The EVM rules a replay must use |
 | `open` | true | Taking new delegations |

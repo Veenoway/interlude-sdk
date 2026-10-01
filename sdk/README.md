@@ -137,7 +137,8 @@ const { latencyMs } = await session.send("move", [1]);
 npm i @interludelayer-sdk/sdk viem
 ```
 
-Node ≥ 20.9 for scripts and SSR. The React entry ships with `"use client"`, so it can be
+Node ≥ 20.9 for scripts and SSR; Node 22 or later for `watch` (it needs a global `WebSocket`,
+see [Reading state](#reading-state)). The React entry ships with `"use client"`, so it can be
 imported from a Next.js App Router page; the core entry has no directive and works on the
 server too.
 
@@ -221,6 +222,11 @@ key again (`SessionRevokedError`), drops it from storage, and refuses to open a 
 pending revocation would kill. Wire `revoke` to a deliberate "log out everywhere" action, not to
 an ordinary sign-out; `session.discard()` is the sign-out.
 
+It is a Monad transaction, so the wallet needs a little MON, and it moves the epoch for every
+Interlude app at once: every node already running, the public demos included, refuses that
+address's new grants until its app is delegated again. Try it with a throwaway key, not the
+wallet you play with.
+
 Individual sessions do not need revoking; they expire. Default expiry is one hour, overridable
 with `expirySeconds` (on `openSession`, on the client, or on `<InterludeProvider>`).
 `<InterludeProvider autoRenew>` signs a fresh grant a minute before expiry (`{ beforeSeconds }`
@@ -276,6 +282,10 @@ capped at 30 s, and so does a subscription the node turned down for a transient 
 know `interlude_subscribe("applied")` at all (`-32601` / `-32602`) is polled for good, until the
 last watcher stops; the next one asks again.
 
+The socket is the runtime's global `WebSocket`: every browser has one, and Node has one from 22
+on. On Node 20 there is none, so `watch` delivers nothing (no error either) and `watchRead` /
+`useWatch` poll the view every `watch.fallbackMs` instead.
+
 ```ts
 const stop = interlude.watch((call) => {
   if (!call.succeeded) return;
@@ -285,6 +295,11 @@ const stop = interlude.watch((call) => {
 // later
 stop();
 ```
+
+`watch` needs a global `WebSocket`: a browser, or Node 22 and later. Node 20 has none (unless
+started with `--experimental-websocket`), so there the callback never runs, and the SDK says so
+once with a `console.warn`; set `globalThis.WebSocket` from the `ws` package before the first
+`watch` to use it on Node 20. `watchRead` and `useWatch` poll their view there instead.
 
 `status` is what `interlude_session` reports: the app, the ephemeral chain id, the validator, the
 pinned base block, the batches committed so far, and the diffs still pending. It is the quickest
@@ -310,8 +325,11 @@ was called: nothing pending, or two more batches committed since. It cannot noti
 restarted node lost, so pass the `hash` when there is one.
 
 `interlude.commit()` publishes the pending diffs now instead of waiting out the node's interval,
-which is mostly useful in tests. A hosted node that set `INTERLUDE_COMMIT_TOKEN` needs
-`createInterludeClient({ …, commitToken })` or the call is refused.
+which is mostly useful in tests. It needs the node's commit token: none on a local
+`interlude dev` node, and on a node you started yourself with `INTERLUDE_COMMIT_TOKEN`, pass it
+as `createInterludeClient({ …, commitToken })`. A node `ship` started refuses it, because its
+token is control's, not yours. Those nodes commit every 10 s; await a send's `settled`, or
+`interlude.waitSettled({ hash })`, to know when Monad has the call.
 
 ## Latency
 
@@ -410,9 +428,22 @@ Not the hot path — this is the app owner's job, once, on the base chain — bu
 here so you do not need a second ABI:
 
 ```ts
-await interlude.delegateAll(ownerWallet);
-await interlude.delegateKey(ownerWallet, keyOf(userAddress));
+import { parseEther } from "viem";
+import { keyOf } from "@interludelayer-sdk/sdk";
+
+// The validator's delegationFee: 0.01 MON on the live terms. Without it: FeeNotPaid.
+await interlude.delegateAll(ownerWallet, { value: parseEther("0.01") });
+// One key's partition, for a per-key surface (`interlude dev` only: a hosted node serves the
+// whole contract, and a shipped app has no per-key slots, so this reverts EmptyDelegation).
+await interlude.delegateKey(ownerWallet, keyOf(userAddress), { value: parseEther("0.01") });
 ```
+
+`ship` already sent `delegateAll()` and paid its fee. You call it yourself only to re-open the
+contract after `undelegate` and `releaseStake`, and you forward the validator's `delegationFee`
+(0.01 MON on the live terms, listed in
+[DEPLOYMENTS.md](https://github.com/Veenoway/interlude-sdk/blob/main/docs/DEPLOYMENTS.md)), or
+the hub reverts `FeeNotPaid`. The owner wallet pays that in testnet MON
+([faucet](https://faucet.monad.xyz)), as it does `acceptOwnership()` after `ship --owner`.
 
 ## Closing the session
 

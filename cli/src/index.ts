@@ -64,7 +64,9 @@ const USAGE = `interlude — run your contract on an ephemeral layer, locally or
   interlude logs --follow [--node <url>] [--abi <file>] [--json]
                                       every call a node runs, as the node reports it;
                                       exits 1 when it cannot be reached or will not stream
-  interlude dev [--config <path>]     stand up a chain, a hub, a validator and a node locally
+  interlude dev [--config <path>]     stand up a chain, a hub, a validator and a node locally;
+                                      needs an interlude-node binary (INTERLUDE_NODE_BIN),
+                                      which this package does not ship
 
 Options
   --config <path>     where interlude.toml is (default: ./interlude.toml)
@@ -424,6 +426,17 @@ async function gen(argv: string[]): Promise<void> {
   }
   const generatedName = `${contract}${GENERATED_SUFFIX}`;
   const generatedImport = `./${generatedFileName(contract)}`;
+  const next = nextAfterGen(projectRoot, contract);
+
+  // Regenerating after a change to a contract that already inherits its surface: the contract
+  // needs nothing, and printing the inheritance scaffold again reads as if it did.
+  if (new RegExp(`\\bis\\b[^{]*\\b${generatedName}\\b`).test(appSource)) {
+    note(`${contract} already inherits ${generatedName}: nothing to change in the contract.`);
+    note(next);
+    note(`Put npx @interludelayer-sdk/cli check in CI, so a layout change cannot pass unnoticed.`);
+    return;
+  }
+
   note(`Now inherit it and register once, in the constructor.`);
   note(`Keep the Delegatable import — the constructor still names Delegatable(hub_).`);
   say("");
@@ -441,8 +454,42 @@ async function gen(argv: string[]): Promise<void> {
   say(`      // function credit(...) external onlyOwner whenNotDelegated(Types.GLOBAL) { ... }`);
   say(`  }`);
   say("");
-  note(`Then: npx @interludelayer-sdk/cli init --contract ${contract}`);
+  note(next);
   note(`Put npx @interludelayer-sdk/cli check in CI, so a layout change cannot pass unnoticed.`);
+}
+
+/**
+ * What to run after `gen`, from what `interlude.toml` already says.
+ *
+ * `init --contract` is the next step only while there is no config: with one, init refuses to
+ * write over it, and suggesting it sent a project that was only regenerating its surface into
+ * "interlude.toml already exists".
+ */
+function nextAfterGen(projectRoot: string, contract: string): string {
+  const path = join(projectRoot, "interlude.toml");
+  if (!existsSync(path)) return `Then: npx @interludelayer-sdk/cli init --contract ${contract}`;
+
+  let named: string | undefined;
+  try {
+    named = parseConfig(readFileSync(path, "utf8"), path).app.contract;
+  } catch {
+    // A config that does not parse is ship's to report, with its own message.
+    return (
+      `Then: npx @interludelayer-sdk/cli check, then forge test. interlude.toml does not parse ` +
+      `as it stands: ship says why.`
+    );
+  }
+  if (named === contract) {
+    return (
+      `Then: npx @interludelayer-sdk/cli check (it compiles and proves the surface matches), ` +
+      `then forge test. interlude.toml already names ${contract}.`
+    );
+  }
+  return (
+    `interlude.toml names ${named ? `"${named}"` : "another contract"}. To ship ${contract}, ` +
+    `set contract = "${contract}" under [app] there (init --contract ${contract} --force would ` +
+    `rewrite the whole file).`
+  );
 }
 
 /**

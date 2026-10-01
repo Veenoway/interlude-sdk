@@ -1,5 +1,22 @@
 # @interludelayer-sdk/cli
 
+## 0.2.2
+
+- **`gen`'s next step follows `interlude.toml`.** After a change to a contract that already
+  inherits its surface, `gen` printed the inheritance scaffold again and "Then: init --contract",
+  and `init` refuses a project that has an `interlude.toml`. It now says the contract needs no
+  change and points at `check` (then `forge test`) when the config names that contract, says how
+  to point the config at it when it names another one, and suggests `init --contract` only when
+  there is no config yet.
+- **The npm description says what the package does for everyone:** generate, check and ship a
+  `Delegatable` contract to a hosted node on Monad testnet. It described `dev`, which needs an
+  `interlude-node` binary this package does not ship. `--help` and the README's `dev` section
+  now say so too.
+- The README starts with the one install line (`npm i -D @interludelayer-sdk/cli` in the Foundry
+  project, the SDK in the frontend) and calls the CLI by its scoped name throughout: a bare
+  `npx interlude` where the CLI is not installed fetches an unrelated npm package.
+- The bundled hub and Solidity are unchanged from 0.2.1.
+
 ## 0.2.1
 
 - **The bundled hub is v3.** `artifacts/InterludeHub.sol/InterludeHub.json`, what `dev` deploys

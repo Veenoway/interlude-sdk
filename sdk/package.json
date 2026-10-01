@@ -1,7 +1,7 @@
 {
   "name": "@interludelayer-sdk/sdk",
-  "version": "0.2.1",
-  "description": "Open a session and send gasless, sub-millisecond transactions to an Interlude node.",
+  "version": "0.2.2",
+  "description": "Open a session and send gasless transactions to an Interlude node: a few ms next to the node, ~40 ms round trip.",
   "license": "MIT",
   "repository": {
     "type": "git",

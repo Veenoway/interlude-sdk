@@ -318,9 +318,12 @@ export interface InterludeClient<TAbi extends Abi> {
    * Hear every call as the node runs it.
    *
    * The payload is what the ephemeral EVM just did — app, calldata, return, logs — the same
-   * for every contract. Re-read a view in the callback, or use `watchRead`. A node that does
-   * not serve the socket falls back to polling so a page still moves. Every watcher on a client
-   * shares one socket.
+   * for every contract. Re-read a view in the callback, or use `watchRead`. While the socket is
+   * down or refused, `options.fallback` runs on a timer instead, so a page still moves. Every
+   * watcher on a client shares one socket.
+   *
+   * Needs a global `WebSocket`: a browser, or Node 22 and later. On Node 20 the callback never
+   * runs, and the SDK warns once (`watchRead` polls its view there instead).
    */
   watch(onCall: (call: AppliedCall) => void, options?: WatchOptions): () => void;
 

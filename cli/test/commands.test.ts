@@ -77,6 +77,33 @@ contract YourApp is Delegatable {
 }
 `;
 
+/** YOUR_APP once it inherits what `gen` wrote: a project that is only regenerating. */
+const YOUR_APP_WITH_SURFACE = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import {Delegatable} from "@interludelayer/contracts/Delegatable.sol";
+import {IInterludeHub} from "@interludelayer/contracts/interfaces/IInterludeHub.sol";
+import {Types} from "@interludelayer/contracts/interfaces/Types.sol";
+import {YourAppInterludeSurface} from "./YourAppInterludeSurface.sol";
+
+contract YourApp is YourAppInterludeSurface {
+    /// @custom:interlude global
+    uint256 internal score;
+
+    /// @custom:interlude global
+    uint256 internal best;
+
+    constructor(IInterludeHub hub_) Delegatable(hub_) {
+        _registerInterludeSurface();
+    }
+
+    function play() external whenNotDelegated(Types.GLOBAL) {
+        score += 1;
+        if (score > best) best = score;
+    }
+}
+`;
+
 const ROOMS = `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -323,6 +350,36 @@ describe.skipIf(!forgeAvailable)("in a project whose path has a space and an acc
     });
     expect(received.length).toBe(before);
   }, 60_000);
+});
+
+describe.skipIf(!forgeAvailable)("gen's next step, from what interlude.toml says", () => {
+  it("sends a new project to init, and one that already has its config to check", async () => {
+    const dir = foundryProject({ "src/YourApp.sol": YOUR_APP });
+
+    const first = await cli(["gen", "--contract", "YourApp"], dir);
+    expect(first.code, first.out).toBe(0);
+    expect(first.out).toContain("Now inherit it and register once");
+    expect(first.out).toContain("Then: npx @interludelayer-sdk/cli init --contract YourApp");
+
+    // A variable added to a contract that already inherits its surface and has a config: the
+    // starter after its first change. gen used to print the inheritance scaffold again and send
+    // it to `init --contract`, which refuses an existing interlude.toml.
+    writeFileSync(join(dir, "src", "YourApp.sol"), YOUR_APP_WITH_SURFACE);
+    writeFileSync(join(dir, "interlude.toml"), `[app]\ncontract = "YourApp"\nargs = ["$HUB"]\n`);
+    const again = await cli(["gen", "--contract", "YourApp"], dir);
+    expect(again.code, again.out).toBe(0);
+    expect(again.out).toMatch(/best\s+slot 1/);
+    expect(again.out).toContain("YourApp already inherits YourAppInterludeSurface");
+    expect(again.out).toContain("Then: npx @interludelayer-sdk/cli check");
+    expect(again.out).not.toMatch(/init --contract|Now inherit it/);
+
+    // A config that names another contract: say so, instead of an init that would refuse.
+    writeFileSync(join(dir, "interlude.toml"), `[app]\ncontract = "Other"\nargs = ["$HUB"]\n`);
+    const other = await cli(["gen", "--contract", "YourApp", "--no-build"], dir);
+    expect(other.code, other.out).toBe(0);
+    expect(other.out).toContain(`interlude.toml names "Other"`);
+    expect(other.out).toContain(`set contract = "YourApp" under [app]`);
+  }, 180_000);
 });
 
 /** Run `body` with `owner = "..."` under [app] in the project's interlude.toml, then put it back. */

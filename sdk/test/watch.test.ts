@@ -2,7 +2,7 @@
  * `watch` / `watchRead` against a scripted socket: how many sockets, how many reads, and in
  * what order the values arrive (audit F11, and the reconnect loop in F20-28).
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createInterludeClient, createAppliedFeed, memoryStore } from "../src/index";
 import { APP, counterAbi, stack } from "./fake";
@@ -308,5 +308,37 @@ describe("the socket's reconnects", () => {
     expect(feed.sockets).toBe(2);
     expect(feed.live).toBe(true);
     second();
+  });
+});
+
+describe("a runtime with no WebSocket", () => {
+  it("warns once that watch() cannot run, and stays quiet for watchRead, which polls", async () => {
+    // Node 20 without --experimental-websocket: no global WebSocket at all.
+    delete (globalThis as { WebSocket?: unknown }).WebSocket;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { client, reads } = watched();
+      const values: bigint[] = [];
+      const stopRead = client.watchRead("counter", undefined, (value) => values.push(value));
+      await sleep(30);
+      // watchRead has a view to poll, so it moves, and there is nothing to warn about.
+      expect(reads()).toBeGreaterThan(0);
+      expect(warn).not.toHaveBeenCalled();
+
+      // watch() has nothing to poll: on this runtime its callback can never run. It used to say
+      // nothing at all; now it says so, once per process however many watchers there are.
+      const stops = [
+        client.watch(() => {}),
+        client.watch(() => {}),
+        createAppliedFeed("http://node.test").subscribe(() => {}),
+      ];
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]![0])).toMatch(/watch\(\) needs a global WebSocket/);
+      expect(String(warn.mock.calls[0]![0])).toMatch(/Node 22/);
+
+      for (const stop of [stopRead, ...stops]) stop();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

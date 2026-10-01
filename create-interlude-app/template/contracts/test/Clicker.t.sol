@@ -29,6 +29,16 @@ contract EpochZeroHub {
     }
 }
 
+/// @dev Clicker plus a way to read the slot numbers `npm run gen` wrote into
+///      `ClickerInterludeSurface.sol`. It declares no state, so its storage layout is Clicker's.
+contract ClickerWithSlots is Clicker {
+    constructor(IInterludeHub hub_) Clicker(hub_) {}
+
+    function generatedSlots() external pure returns (bytes32 clicksSlot, bytes32 totalSlot) {
+        return (CLICKS_SLOT, TOTAL_SLOT);
+    }
+}
+
 /// @notice What makes Clicker safe to hand to a node, checked without one.
 ///
 ///         The node runs this same bytecode on its own chain id, so "on the node" below is
@@ -70,22 +80,26 @@ contract ClickerTest {
         _eq(clicker.totalClicks(), 3, "total");
     }
 
-    /// @dev The generated surface registers the slots solc assigned, and those are the slots
-    ///      the values really live in. If this fails, run `npm run gen` and read what moved.
+    /// @dev The generated surface registers `clicks` and `total`, and the slots it names are
+    ///      where solc really put them. The slot numbers come from the generated file itself, so
+    ///      adding variables and running `npm run gen` keeps this passing. It fails when the
+    ///      surface is stale (run `npm run gen` and read what moved) or stops handing these two
+    ///      over. Rename either variable and `gen` renames its `_SLOT` constant too: update
+    ///      `ClickerWithSlots` above to match.
     function test_theSurfaceHandsOverTheSlotsSolcAssigned() public {
+        ClickerWithSlots app = new ClickerWithSlots(IInterludeHub(address(hub)));
+        (bytes32 clicksSlot, bytes32 totalSlot) = app.generatedSlots();
         (bytes32[] memory globalSlots, bytes32[] memory globalMaps, bytes32[] memory perKey) =
-            clicker.delegatedSurface();
-        _eq(globalMaps.length, 1, "one whole mapping");
-        _eq(uint256(globalMaps[0]), 0, "clicks at slot 0");
-        _eq(globalSlots.length, 1, "one scalar");
-        _eq(uint256(globalSlots[0]), 1, "total at slot 1");
+            app.delegatedSurface();
+        _has(globalMaps, clicksSlot, "clicks, handed over as one whole mapping");
+        _has(globalSlots, totalSlot, "total, handed over as one scalar");
         _eq(perKey.length, 0, "nothing per key: the hosted node serves GLOBAL only");
 
         vm.prank(alice);
-        clicker.click();
-        bytes32 aliceSlot = keccak256(abi.encode(alice, uint256(0)));
-        _eq(uint256(vm.load(address(clicker), aliceSlot)), 1, "alice's entry where the hub looks");
-        _eq(uint256(vm.load(address(clicker), bytes32(uint256(1)))), 1, "total at slot 1");
+        app.click();
+        bytes32 aliceSlot = keccak256(abi.encode(alice, clicksSlot));
+        _eq(uint256(vm.load(address(app), aliceSlot)), 1, "alice's entry where the hub looks");
+        _eq(uint256(vm.load(address(app), totalSlot)), 1, "total where the hub looks");
     }
 
     /// @dev While the node holds the state, a click on Monad would fork the two copies. The
@@ -203,6 +217,13 @@ contract ClickerTest {
             mappingBase: bytes32(0),
             key: bytes32(0)
         });
+    }
+
+    function _has(bytes32[] memory registered, bytes32 slot, string memory what) internal pure {
+        for (uint256 i = 0; i < registered.length; ++i) {
+            if (registered[i] == slot) return;
+        }
+        revert(string.concat(what, ": slot ", _str(uint256(slot)), " is not registered"));
     }
 
     function _eq(uint256 got, uint256 want, string memory what) internal pure {

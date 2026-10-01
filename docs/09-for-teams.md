@@ -17,21 +17,20 @@ nothing, and neither does the CLI in the web app. The Foundry project needs
 solc 0.8.28 or later and `evm_version` cancun or later (the vendored contracts
 use transient storage); `init` warns if `foundry.toml` pins something older.
 
-> **Needs 0.2.0.** Every command on this page needs
-> `@interludelayer-sdk/cli@0.2.0` and `@interludelayer-sdk/sdk@0.2.0`, both on
-> npm. The earlier cli 0.1.6 and sdk 0.1.3 predate the audit: cli 0.1.6
-> **silently ignores** `--owner` and `--out`, so `ship` deploys a contract we
-> own, and it has no `abi`, `status` or `sessions create --signature`. A `^0.1`
-> range never resolves to 0.2.0.
+> **Needs 0.2.2.** Every command on this page needs `@interludelayer-sdk/cli`
+> and `@interludelayer-sdk/sdk` 0.2.2 or later, both on npm. The 0.1.x releases
+> are older: cli 0.1.6 **silently ignores** `--owner` and `--out`, so `ship`
+> deploys a contract we own, and it has no `abi`, `status` or
+> `sessions create --signature`. A `^0.1` range never resolves to 0.2.
 
 ```sh
 # contracts/, your Foundry project
-npm i -D @interludelayer-sdk/cli@^0.2.0
+npm i -D @interludelayer-sdk/cli@^0.2.2
 npx @interludelayer-sdk/cli init
 npx @interludelayer-sdk/cli gen --contract YourApp
 
 # web/, your frontend
-npm i @interludelayer-sdk/sdk@^0.2.0 viem
+npm i @interludelayer-sdk/sdk@^0.2.2 viem
 ```
 
 `init` vendors `Delegatable` into `lib/interlude` and writes the remapping

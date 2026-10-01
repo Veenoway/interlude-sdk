@@ -20,15 +20,18 @@ import { connect, ensureChain, injected, walletFor, type ConnectedWallet } from 
  *
  * Three numbers on screen, each from a different place, and the gap between them is the point:
  *   - your count moves the instant you click (optimistic, local);
- *   - the node's answer comes back in about a millisecond (live, `useWatch`);
+ *   - the node's answer comes back in one round trip, ~40 ms, a few ms of it on the node
+ *     (live, `useWatch`);
  *   - Monad catches up every few seconds, when the node commits (settled, `waitSettled`).
  */
 export function ClickerApp() {
+  const node = useNodeCheck();
   if (configProblem) return <Setup problem={configProblem} />;
-  return <Connected />;
+  if (node.wrongNode) return <Setup problem={node.wrongNode} />;
+  return <Connected notice={node.unreachable} />;
 }
 
-function Connected() {
+function Connected({ notice }: { notice: string | null }) {
   const [wallet, setWallet] = useState<ConnectedWallet | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -98,6 +101,7 @@ function Connected() {
         )}
 
         {problem && <p className="error">{problem}</p>}
+        {notice && <p className="error">{notice}</p>}
 
         <Scoreboard total={total.value} settlement={settlement} />
       </main>
@@ -216,7 +220,7 @@ function Setup({ problem }: { problem: string }) {
       <p className="lede">This page needs to know which app and which node to talk to.</p>
       <pre className="code">{`cd ../contracts
 npm run build
-npx interlude ship --owner <your address> --out ../web/.env.local
+npx @interludelayer-sdk/cli ship --owner <your address> --out ../web/.env.local
 
 # then restart this dev server: Next.js reads .env.local at start-up
 npm run dev`}</pre>
@@ -228,6 +232,64 @@ npm run dev`}</pre>
 }
 
 // --- hooks -----------------------------------------------------------------
+
+interface NodeCheck {
+  /** The node answers for another contract: nothing on this page can work against it. */
+  wrongNode: string | null;
+  /** The node has not answered yet. Asked again until it does. */
+  unreachable: string | null;
+}
+
+/**
+ * Which contract the node serves, asked once on load.
+ *
+ * A node serves one contract, and the commonest setup mistake is a node URL from somewhere else:
+ * a public demo's, or an earlier ship's. Every call then fails with `WrongNodeError`, and until
+ * the first click the page would only show a quiet 0. `status().app` says it up front.
+ */
+function useNodeCheck(): NodeCheck {
+  const [check, setCheck] = useState<NodeCheck>({ wrongNode: null, unreachable: null });
+
+  useEffect(() => {
+    if (configProblem) return;
+    let cancelled = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+
+    const ask = async () => {
+      try {
+        const status = await interlude.status();
+        if (cancelled) return;
+        setCheck({
+          wrongNode:
+            status.app.toLowerCase() === config.app.toLowerCase()
+              ? null
+              : `The node at ${config.node} serves ${status.app}, not ${config.app}. Each node ` +
+                `serves one contract: NEXT_PUBLIC_INTERLUDE_NODE has to be the node ship printed ` +
+                `for NEXT_PUBLIC_INTERLUDE_APP.`,
+          unreachable: null,
+        });
+      } catch (error) {
+        if (cancelled) return;
+        console.warn(error); // the whole story (status, URL) for the console; the page says less
+        setCheck({
+          wrongNode: null,
+          unreachable:
+            `The node at ${config.node} is not answering yet. A 502 in the first few minutes ` +
+            `after ship is its machine starting. Asking again every 5 s.`,
+        });
+        retry = setTimeout(() => void ask(), 5_000);
+      }
+    };
+
+    void ask();
+    return () => {
+      cancelled = true;
+      if (retry !== undefined) clearTimeout(retry);
+    };
+  }, []);
+
+  return check;
+}
 
 interface OptimisticCounter {
   value: bigint;

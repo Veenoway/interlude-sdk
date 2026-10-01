@@ -1,7 +1,7 @@
 # __APP_NAME__
 
-A contract on Monad that answers in a millisecond, with no gas and no wallet prompt after the
-first signature.
+A contract on Monad that answers in one round trip (a few ms next to the node, ~40 ms over the
+network), with no gas and no wallet prompt after the first signature.
 
 `contracts/Clicker.sol` is an ordinary Solidity contract that inherits Interlude's
 `Delegatable`. Once delegated, an Interlude node holds its state and runs its calls; every few
@@ -19,16 +19,18 @@ browser wallet (MetaMask, Rabby, Phantom). Clicking needs no MON. Taking ownersh
 cd contracts
 npm i
 npm run build
-npx interlude ship --owner <your address> --out ../web/.env.local
+npx @interludelayer-sdk/cli ship --owner <your address> --out ../web/.env.local
 cd ../web && npm i && npm run dev
 ```
 
 Then open http://localhost:3000, connect, open a session, click.
 
-The project asks for `@interludelayer-sdk/cli` and `@interludelayer-sdk/sdk` `^0.2.1`: the
-releases that bundle the v3 hub and name the v3 public floors. Do not settle for an older one
-if npm offers it: CLI 0.1.x silently ignores `--owner` and `--out`, so the app would stay owned
-by Interlude's deploy key.
+The project asks for `@interludelayer-sdk/cli` and `@interludelayer-sdk/sdk` `^0.2.2`. Do not
+settle for an older one if npm offers it: CLI 0.1.x silently ignores `--owner` and `--out`, so
+the app would stay owned by Interlude's deploy key, and 0.2.0 predates the v3 hub. Call the CLI
+by its scoped name, `npx @interludelayer-sdk/cli`, as above: after `npm i` that runs the copy
+installed in `contracts/`, and anywhere else it fetches the right package. A bare
+`npx interlude` outside `contracts/` would fetch an unrelated npm package of that name.
 
 1. **`npm i`** installs `@interludelayer-sdk/cli`, which carries Interlude's Solidity sources.
 2. **`npm run build`** (`interlude check`) copies those sources into `lib/interlude`, compiles,
@@ -44,8 +46,9 @@ by Interlude's deploy key.
 4. **`npm run dev`** in `web/` serves the page. Next.js reads `.env.local` at start-up, so
    restart it after shipping again.
 
-`npx interlude status <app>` shows the owner, the pending owner, the delegation and the node's
-health at any time.
+`npx @interludelayer-sdk/cli status <app>` shows the owner, the pending owner, the delegation
+and the node's health at any time. If the page says the node serves another contract,
+`NEXT_PUBLIC_INTERLUDE_NODE` is not the node `ship` printed for this app.
 
 ## What is where
 
@@ -67,12 +70,14 @@ web/
 1. Edit `contracts/src/Clicker.sol`. Put new state **below** the existing variables and
    annotate it `/// @custom:interlude global` if the node should hold it.
 2. `npm run gen` rewrites the surface from the new layout, and `npm run build` checks it.
-   Keep `npm run check` in CI: it fails when the layout and the surface disagree.
+   Keep `npm run check` in CI: it fails when the layout and the surface disagree. `npm test`
+   keeps passing: its slot test reads the slot numbers from the regenerated surface, not from
+   the test. Tests for your new functions are yours to add in `test/Clicker.t.sol`.
 3. `npm run abi` rewrites `web/lib/abi.ts`, so the page's calls are typed against the new ABI.
 4. Add the new function names to `SCOPE` in `web/lib/interlude.ts` if a session key should be
    able to call them.
-5. `npx interlude ship --owner <you> --out ../web/.env.local` deploys a new copy at a new
-   address. Shipping the exact same build twice is refused with the existing address;
+5. `npx @interludelayer-sdk/cli ship --owner <you> --out ../web/.env.local` deploys a new copy
+   at a new address. Shipping the exact same build twice is refused with the existing address;
    `--again` deploys a second copy on purpose.
 
 `npm run dev` in `contracts/` (`interlude dev`) runs the whole stack on your laptop: anvil, a
@@ -97,7 +102,8 @@ anything of value in it.
   lets it do (`undelegate`, a new delegation). With `--owner`, ownership is offered to your
   address once the delegation is open, and it is yours when you call `acceptOwnership()`. Until
   then, Interlude's key still is the owner. To deploy with your own key instead, deploy and call
-  `delegateAll()` yourself, then `npx interlude sessions create <app>` asks for a node.
+  `delegateAll()` yourself, then `npx @interludelayer-sdk/cli sessions create <app>` asks for a
+  node.
 - **Interlude runs the validator and the node.** They see and order every call. A commit that
   misstates what the node executed can be challenged on Monad during the validator's challenge
   window; a proven fraud slashes its bond and rewinds the diffs. Validators and resolvers are

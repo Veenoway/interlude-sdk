@@ -7,7 +7,7 @@ This repository is the public surface a team integrates against. The engine itse
 | Package | npm | What it is |
 |---|---|---|
 | `@interludelayer-sdk/sdk` | [npm](https://www.npmjs.com/package/@interludelayer-sdk/sdk) | Sessions, gasless calls, live vs settled reads |
-| `@interludelayer-sdk/cli` | [npm](https://www.npmjs.com/package/@interludelayer-sdk/cli) | `init`, `gen`, `check`, `abi`, `status`, `dev`, `ship` |
+| `@interludelayer-sdk/cli` | [npm](https://www.npmjs.com/package/@interludelayer-sdk/cli) | `init`, `gen`, `check`, `abi`, `status`, `ship`; `dev` needs a node binary that is not published |
 | `create-interlude-app` | [npm](https://www.npmjs.com/package/create-interlude-app) | A Foundry + Next.js project, ready to `ship` |
 
 ## Start
@@ -16,15 +16,24 @@ This repository is the public surface a team integrates against. The engine itse
 npx create-interlude-app my-app
 ```
 
-Or add Interlude to an existing project:
+Or add Interlude to an existing project: the CLI in the Foundry project, the SDK in the
+frontend.
 
 ```sh
-npm i @interludelayer-sdk/sdk
+# Foundry project
 npm i -D @interludelayer-sdk/cli
-npx interlude init
-npx interlude gen --contract YourApp
-npx interlude ship --owner <your address> --out .env.local
+npx @interludelayer-sdk/cli init
+npx @interludelayer-sdk/cli gen --contract YourApp
+npx @interludelayer-sdk/cli init --contract YourApp
+npx @interludelayer-sdk/cli ship --owner <your address> --out ../web/.env.local
+
+# frontend
+npm i @interludelayer-sdk/sdk viem
 ```
+
+The first `init` exits 1 with a starter contract until one inherits `Delegatable`; the first hour
+walks through it. Call the CLI by its scoped name: a bare `npx interlude` where it is not
+installed fetches an unrelated npm package.
 
 Docs: [interludelayer.xyz/docs](https://interludelayer.xyz/docs) · first hour: [interludelayer.xyz/docs/first-hour](https://interludelayer.xyz/docs/first-hour)
 

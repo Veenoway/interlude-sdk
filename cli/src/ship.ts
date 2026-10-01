@@ -368,8 +368,8 @@ export function envFor(result: ShipResult, rpc: string): Record<string, string> 
 /**
  * A record of what this project has shipped, so running `ship` twice is not two deploys.
  *
- * Each deploy spends a rate-limited slot shared by everybody behind the same IP — a hackathon
- * room — and leaves a second contract nobody will use. The record is keyed by everything that
+ * Each deploy spends a rate-limited slot shared by everybody behind the same IP — a classroom or
+ * a meetup — and leaves a second contract nobody will use. The record is keyed by everything that
  * decides what gets deployed (bytecode, arguments, setup, owner, stake) and not by the label or
  * region, which only decide where the node runs.
  */

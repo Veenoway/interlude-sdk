@@ -1,10 +1,10 @@
 # Audit of 2026-09-26: what was fixed, and where
 
-The audit is `docs/audit/2026-09-26-audit.md` (French). Branch `fix/audit-critical` answers it in
-two passes. The first ran one workstream per area. An independent re-audit of the merged branch
-then checked every claim and found what the first pass missed. The second pass (**fix round 2**)
-closes what the re-audit confirmed. This table is the index: one row per finding, its status, and
-where the fix lives. Each row is written so it can be checked.
+A security review on 2026-09-26 covered the whole repository. Branch `fix/audit-critical` answers
+it in two passes: a first fix pass by area, then a second review of the merged branch (the
+re-audit below), which checked every claim and found what the first pass missed. The second pass
+(**fix round 2**) closes what the re-audit confirmed. This table is the index: one row per finding,
+its status, and where the fix lives. Each row is written so it can be checked.
 
 **Nothing below reaches Monad testnet just by being merged.** The hub is immutable and every app
 binds its hub at construction, so hub and `Delegatable` fixes reach the chain only through a new hub
@@ -21,7 +21,7 @@ Status: **fixed** (done and tested on the branch) · **fixed in round 2** (found
 re-audit, addressed by the second pass; every round-2 fix was merged and the whole branch re-verified
 afterwards: forge 529/529, cargo 357 passed, clippy and fmt clean, sdk/cli/control/starter/demo/Kandle
 suites green, and `gridbet-demo --e2e`, `dispute-e2e all` (honest, relay, epoch-2, dishonest),
-`sdk-e2e` and the Room smoke test all passing; see `docs/audit/2026-09-26-rapport-final.md`) ·
+`sdk-e2e` and the Room smoke test all passing) ·
 **partial** (the note says what is missing) · **not done** (the note says why) ·
 **documented** (a design limit, stated where a reader will find it).
 
@@ -109,11 +109,11 @@ suites green, and `gridbet-demo --e2e`, `dispute-e2e all` (honest, relay, epoch-
 
 | Area | Findings | Status |
 |---|---|---|
-| Hub + Delegatable | C-01, C-02, H-01…H-05, M-01…M-06, L-03, L-04, L-06, L-09, I-01 | **fixed** (hub stream; `forge test` all green at the time of writing). H-04 extended in round 2 (see #13). M-07: **documented**, no admin escape hatch on purpose (it would be a key that moves every app's state). L-07: **documented**, the validator names each midRoot and a leaf both sides prove goes to the vote. L-02: round 2. L-01 (the owner can `delegateRaw` `Delegatable`'s keccak-derived layout slots outside the reserved range) and L-10 (no on-chain guard on the node's ruleset beyond its boot check): **not done**. |
+| Hub + Delegatable | C-01, C-02, H-01…H-05, M-01…M-06, L-03, L-04, L-06, L-09, I-01 | **fixed** (hub pass; `forge test` all green at the time of writing). H-04 extended in round 2 (see #13). M-07: **documented**, no admin escape hatch on purpose (it would be a key that moves every app's state). L-07: **documented**, the validator names each midRoot and a leaf both sides prove goes to the vote. L-02: round 2. L-01 (the owner can `delegateRaw` `Delegatable`'s keccak-derived layout slots outside the reserved range) and L-10 (no on-chain guard on the node's ruleset beyond its boot check): **not done**. |
 | Node state | N-C1, N-C3, N-H1, N-H3…N-H5, M1, M2, M5, M9–M12, B2–B5, heartbeat | **fixed**, except: N-H1 **partial** (`eth_call`/`eth_estimateGas` can still read the base chain under the session lock, now bounded by 5 s / 2 s timeouts and fail-fast on 429); a fee-bumped commit pending across a restart may be refused as underpriced once; Railway drain time not set (B5, Fly is done). |
 | Node RPC | N-C2, N-H2, N-H7, N-H8, M3, M4, M6–M8, M13, B1, B6, B8 | **fixed** (B1 by node-state). `eth_call` revert answer: round 2. |
 | Responder + watcher | CP-C1, N-H6, N-M14, B7 | **fixed** for local keys, floors and epoch 1; hosted relay URL, epoch ≥ 2 replay and poster timeouts in round 2. H6: an out-of-bounds clock that leaves the root unchanged is logged, not a disagreement (documented). |
-| Control | CP-H1…H6, CP-M1…M9, L1–L8 | **fixed**: CP-H2, CP-H3, CP-H5, CP-H6, the CP-M group (M1–M8 in the control stream's numbering; the Pyth Lazer token handed to visitors is KND-13, fixed in Kandle), L2, L3, L7, L8. Round 2: CP-H4 allowlist bypass, M4 pre-auth bodies, `/disputes/move` auth, setup gas, execTimestamp refusal, error ABIs. **Partial**: CP-H4 persistence (`packages/control/fly.toml` now mounts a volume for `CONTROL_STATE_FILE`; until the live app is redeployed with it, and the volume chowned to the `node` user, the registry and the watcher checkpoint live in memory), L1 (legacy epoch-less tokens stay accepted by default because floors and the lab still carry them), M7 (base image by tag, not digest), CP-H1 (since hub v2 the validator, `0xa375…eF43`, is a key of its own; the admin, `0xB28E…d691`, still owns the public floors, GridBet and the salon). |
+| Control | CP-H1…H6, CP-M1…M9, L1–L8 | **fixed**: CP-H2, CP-H3, CP-H5, CP-H6, the CP-M group (M1–M8 in the control pass's numbering; the Pyth Lazer token handed to visitors is KND-13, fixed in Kandle), L2, L3, L7, L8. Round 2: CP-H4 allowlist bypass, M4 pre-auth bodies, `/disputes/move` auth, setup gas, execTimestamp refusal, error ABIs. **Partial**: CP-H4 persistence (`packages/control/fly.toml` now mounts a volume for `CONTROL_STATE_FILE`; until the live app is redeployed with it, and the volume chowned to the `node` user, the registry and the watcher checkpoint live in memory), L1 (legacy epoch-less tokens stay accepted by default because floors and the lab still carry them), M7 (base image by tag, not digest), CP-H1 (since hub v2 the validator, `0xa375…eF43`, is a key of its own; the admin, `0xB28E…d691`, still owns the public floors, GridBet and the salon). |
 | CLI | CLI-1…CLI-6, P1 commands | **fixed**. Round 2: `sessions create --signature`, `ship --stake`, `ship --again`, non-zero local `delegationFee`. Not done: server-side idempotency of `ship`; `check` verifying `_registerInterludeSurface()`. On npm: 0.2.0. |
 | SDK | F5–F17, F20–F28 | **fixed**. F25 (retry a transient subscribe error) and the 0.2.0 version: round 2. F8 node side: **documented**, a running node honours a revoked grant until re-delegation. On npm: 0.2.0. |
 | Example contracts | EX-1…EX-14 | **fixed**, with EX-3 non-decreasing (not strict) print times and EX-4 a half-unit minimum notional. TapBook squat: round 2. Tape still lets a player pick among prints held within `maxAge` (low, open). |
