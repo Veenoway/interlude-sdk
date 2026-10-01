@@ -88,6 +88,7 @@ Past a batch limit there are two answers, and the difference matters:
 | Commit period, standalone node | 1 s if anything is pending | `INTERLUDE_COMMIT_SECS` |
 | Commit period, floors | 1 s | `scripts/fly-floor.sh` |
 | Commit period, nodes control-v2 starts (`ship`, GridBet, the salon) | 10 s | `INTERLUDE_COMMIT_SECS` in `fly.v2.toml` (control's own default is 5) |
+| Commit period, Interlude Exchange's two books | 2 s | `CONTROL_COMMIT_SECS_BY_APP` in `fly.v2.toml`, and `COMMIT_SECS` in `apps/demo/lib/tap-agents.ts`, which the page assumes |
 | Early commit | when the open batch reaches three quarters of any limit | the node |
 | Heartbeat, when nothing is pending | every min(`maxBatchInterval` / 2, 900 s): 15 minutes on the live terms | `INTERLUDE_HEARTBEAT_SECS` |
 | Force-close by anyone | after `maxBatchInterval` (3600 s) plus a five-minute grace without a commit | hub v3 |
@@ -113,28 +114,28 @@ apps share, it can be one per app.
 
 Two columns, because they are not the same thing. **control-v2** is the configuration committed
 for the hosted control behind `control.interludelayer.xyz`: `packages/control/fly.v2.toml` as of
-commit `a1191e0` (2026-09-28), and the default wherever that file sets nothing, marked "the
-default". It is what the next deploy runs, not a reading of the live machine: the only one of
-these read back from it is the commit gas cap (`GET /config` answers `commitGasCap` 25,000,000,
-[DEPLOYMENTS.md](DEPLOYMENTS.md)). Whether it runs `a1191e0`'s floor pools, MON ceilings and
-200 MON threshold is for the owner to confirm (`GET /admin/spend`, admin token, lists a `floors`
-pool once it does). **Default** is what `packages/control/src/config.ts` uses when the variable is
+2026-09-30 (the ceilings sized for the Exchange books' 2 s commits), and the default wherever that
+file sets nothing, marked "the default". It is what the next deploy runs, not a reading of the
+live machine: the only one of these read back from it is the commit gas cap (`GET /config`
+answers `commitGasCap` 25,000,000, [DEPLOYMENTS.md](DEPLOYMENTS.md)). Whether it runs these
+ceilings is for the owner to confirm (`GET /admin/spend`, admin token, lists what each app and
+pool spent in the hour). **Default** is what `packages/control/src/config.ts` uses when the variable is
 unset: what a control you run yourself gets.
 
 | Limit | control-v2 | Default | Setting | Past it |
 |---|---|---|---|---|
-| Gas per partner app | 2,000,000,000 | 200,000,000 | `CONTROL_APP_GAS_PER_HOUR` | HTTP 429 "this app has spent its gas budget for this hour (C gas)", C the ceiling |
-| MON per partner app | 205 MON | none: the gas budget only | `CONTROL_APP_WEI_PER_HOUR` | HTTP 429 "this app has spent its MON budget for this hour" |
-| Gas, all partner apps together, and control's own closes and lab transactions (the floors not included) | 4,000,000,000 | 2,000,000,000 | `CONTROL_GLOBAL_GAS_PER_HOUR` | HTTP 429 "the control plane has spent its gas budget for this hour" |
+| Gas per partner app | 6,000,000,000 | 200,000,000 | `CONTROL_APP_GAS_PER_HOUR` | HTTP 429 "this app has spent its gas budget for this hour (C gas)", C the ceiling |
+| MON per partner app | 615 MON | none: the gas budget only | `CONTROL_APP_WEI_PER_HOUR` | HTTP 429 "this app has spent its MON budget for this hour" |
+| Gas, all partner apps together, and control's own closes and lab transactions (the floors not included) | 16,000,000,000 | 2,000,000,000 | `CONTROL_GLOBAL_GAS_PER_HOUR` | HTTP 429 "the control plane has spent its gas budget for this hour" |
 | Gas per public floor (the lab included) | 1,000,000,000 | 1,000,000,000 | `CONTROL_FLOOR_GAS_PER_HOUR` | HTTP 429 "this floor has spent its gas budget for this hour (C gas)", C the ceiling |
 | Gas, all floors together | 1,500,000,000 | 1,500,000,000 | `CONTROL_FLOOR_TOTAL_GAS_PER_HOUR` | HTTP 429 "the operator floors have spent their gas budget for this hour" |
 | MON, all floors together | 155 MON | none | `CONTROL_FLOOR_TOTAL_WEI_PER_HOUR` | HTTP 429 "the operator floors have spent their MON budget for this hour" |
-| MON, everything control books against commits: every commit, floors included, and control's own closes and lab transactions | 230 MON | none | `CONTROL_GLOBAL_WEI_PER_HOUR` | HTTP 429 "the control plane has spent its MON budget for this hour" |
-| Spacing between a partner app's commits (the floors skip it) | 2 s, the default | 2 s | `CONTROL_MIN_COMMIT_INTERVAL_MS` | HTTP 429 "commits for this app are limited to one every 2000 ms" |
+| MON, everything control books against commits: every commit, floors included, and control's own closes and lab transactions | 1,800 MON | none | `CONTROL_GLOBAL_WEI_PER_HOUR` | HTTP 429 "the control plane has spent its MON budget for this hour" |
+| Spacing between a partner app's commits (the floors skip it) | 1 s | 2 s | `CONTROL_MIN_COMMIT_INTERVAL_MS` | HTTP 429 "commits for this app are limited to one every 1000 ms"; the node waits and sends again |
 | Commits per app, floors included | 3,600 per hour | 3,600 per hour | `CONTROL_COMMIT_PER_HOUR` | HTTP 429 "too many commits this hour" |
 | Gas limit of one commit: the estimate plus 20 %, capped | 25,000,000 | 8,000,000 | `CONTROL_COMMIT_GAS_CAP` (margin: `CONTROL_COMMIT_GAS_MARGIN_PCT`) | HTTP 409 "commit needs N gas, above the C cap", before anything is sent; the node holds its batches under it (above), and a commit control still refuses on it halts the node instead of being retried |
 | Diffs and log entries per relayed commit | 256 and 2,048 | the same | fixed | HTTP 400 |
-| Balance under which control's `/health` warns | 200 MON on the validator and the fee payer; 1 MON on floor-lab's validator, the default | 1 MON each | `CONTROL_MIN_BALANCE_WEI`, `CONTROL_LAB_MIN_BALANCE_WEI` | `/health` answers `degraded` with a warning, still HTTP 200. Nothing is refused |
+| Balance under which control's `/health` warns | 1,000 MON on the validator and the fee payer; 1 MON on floor-lab's validator, the default | 1 MON each | `CONTROL_MIN_BALANCE_WEI`, `CONTROL_LAB_MIN_BALANCE_WEI` | `/health` answers `degraded` with a warning, still HTTP 200. Nothing is refused |
 
 Every refusal from the first eight rows carries `retryAfterMs` in its body and a `Retry-After`
 header: when the oldest spend of that hour leaves the window, or when the spacing is over. Control's
@@ -142,16 +143,17 @@ own closes and lab transactions are counted and never refused.
 
 How control-v2's figures hold together, at 102 gwei (the gas price `fly.v2.toml` was sized at; at
 another price the MON a gas ceiling stands for moves with it, and the MON ceilings do not): an
-app's 2B gas is about 204 MON and the floors' 1.5B about 153, so for one app and for the floors
+app's 6B gas is about 612 MON and the floors' 1.5B about 153, so for one app and for the floors
 the gas ceilings bind first, and the MON ones only if gas costs more (above about 102.5 gwei for
-an app, 103.3 for the floors). For all the partner apps together it is the other way round: their
-4B gas (control's own closes and lab transactions count in it too) would be about 408 MON, so the
-wallet's 230 MON binds first, and the floors spend from it too. At 102 gwei the floors' gas stops
-them at about 153 MON, which leaves the partners about 77, about 755M gas; whatever gas costs,
-the floors stop at their 155 MON ceiling at the latest, so they leave the partners about 75 at
-worst. One partner at its gas ceiling (about 204 MON at 102 gwei) leaves the floors about 26, and
-about 25 at worst (its 205 MON ceiling); several partners at once can use the whole 230 between
-them. Deploys are outside all of these, in a book of their own (below).
+an app, 103.3 for the floors). The partners' 16B is about 1,632 MON, and the wallet's 1,800 covers
+it with the floors' 155, so at 102 gwei no ceiling of the wallet's binds before the gas ones.
+The app ceiling is sized for an Exchange book committing every 2 s: its page's agents stop adding
+to a batch that would bill 2.6M, so a book held there for an hour spends about 4.82B, and the
+partners' pool holds both books at that bound at once beside Kandle's seven tables and the seven
+salons busy (15.11B, [runbooks/tap-books.md](runbooks/tap-books.md), "Budget"). It is a large
+ceiling for what the wallet holds (about 10,100 MON on 30/09: five hours at 1,800 an hour before
+`/health` warns): what it spends is what is busy, about 395 MON an hour for one book with a
+visitor's agents. Deploys are outside all of these, in a book of their own (below).
 
 A node reads a 429 from control as backpressure: it waits what control asks (at most 10 s a time,
 up to four times per attempt) and sends again. A budget that stays spent turns into failed

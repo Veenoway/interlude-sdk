@@ -12,7 +12,7 @@ permissioned phase ("v1 is a curated set"), which all three hubs belong to.
 | | |
 |---|---|
 | Hub v3 | [`0x98922c6E5e4Bea62761C71D2401c7ec2c26eC43e`](https://testnet.monadscan.com/address/0x98922c6E5e4Bea62761C71D2401c7ec2c26eC43e), deployed at block 66269347 (2026-09-28 00:34 UTC) |
-| Its bytecode | `packages/contracts/src/InterludeHub.sol` as of commit `ec48f1b`, built with the repo's `foundry.toml` (solc 0.8.28, 200 optimizer runs): the runtime code on chain is byte for byte `forge build`'s `deployedBytecode`. Built from a later commit, only the CBOR metadata tail differs: files were added to the source tree since, the hub's code was not touched |
+| Its bytecode | `packages/contracts/src/InterludeHub.sol` as of commit `ec48f1b`, built with the repo's `foundry.toml` (solc 0.8.28, 200 optimizer runs): the runtime code on chain is byte for byte `forge build`'s `deployedBytecode`. Built from any later commit up to b492b59 the bytes are the same, metadata hash included: the six files the hub compiles from have not changed since `ec48f1b`. Verified on MonadScan and Sourcify ([Source verification](#source-verification)) |
 | Admin | `0xB28E684815b095aB5Fb324214cfEa63d76F3d691` (`allowValidator`, `allowResolver`) |
 | Validator | `0xa375CF27eD39491dB8302Ffc3dF4210Ad263eF43`, the hub's `defaultValidator`: bond 3.2 MON, 2.6 MON of it reserved by 26 live delegations (of the 32 its terms allow) |
 | Bench | `committeeOf(0xa375…eF43)` returns judges A and B at threshold 2. A session copies this bench when it opens: the cold resolver plus A and B, two votes of three to settle a dispute. The validator set it at block 66886352 (2026-09-30 05:19 UTC); sessions opened before keep the cold resolver alone ([below](#which-bench-a-session-sits-on)) |
@@ -47,7 +47,7 @@ session reads:
 
 | Bench | Sessions |
 |---|---|
-| Two of three: the cold resolver, A and B, threshold 2 | Tap's two books, opened after the bench was set. The Lie Lab, under the lab validator |
+| Two of three: the cold resolver, A and B, threshold 2 | Interlude Exchange's two books, opened after the bench was set. The Lie Lab, under the lab validator |
 | The cold resolver alone, threshold 1 | Everything the prod validator opened before block 66886352: the eight floors, the old lab Room, the seven salons, Kandle's seven tables and GridBet v3 |
 
 To check any of it yourself:
@@ -126,11 +126,13 @@ Every table reads the same from the chain:
 | Bridge | `0x8332a249C256Bb9bE79e414a48e787eCAE0525cB` (`moneyBridge()`, and each Cashier's `bridge()`), kandle-feed's bridge key |
 | Bench | The cold resolver alone, threshold 1: the tables opened before the bench was set |
 
-### Tap
+### Interlude Exchange
 
-Tap, the on-chain order book on [the demo's `/tap`](https://demo.interludelayer.xyz/tap), runs
+Interlude Exchange (Tap until its rename), the on-chain order book on
+[the demo's `/exchange`](https://demo.interludelayer.xyz/exchange) (`/tap` redirects there), runs
 two `TapBook`s (`packages/contracts/src/examples/TapBook.sol`), one per region, each served by a
-node control-v2 started in that region, with 10 s commits. Both books were opened with
+node control-v2 started in that region, with 2 s commits (`CONTROL_COMMIT_SECS_BY_APP` in
+`packages/control/fly.v2.toml`; 10 s until 2026-09-30). Both books were opened with
 `scripts/open-tap-books.sh` ([runbook](runbooks/tap-books.md)), and both sit on the two-of-three
 bench.
 
@@ -176,8 +178,39 @@ that held every code before; the other six were opened with `scripts/open-region
 | Judges | `https://interlude-judge-a.fly.dev`, `https://interlude-judge-b.fly.dev` | Judges A and B (`packages/node/fly.judge-a.toml`, `fly.judge-b.toml`). Each finds every session that seats it, and also follows GridBet v3 and the Paris floor, where it only alerts. `/health` lists the sessions it follows, their bench, and `needsHuman` |
 | Lie Lab conductor | `https://interlude-lielab.fly.dev` | Fly app `interlude-lielab`. It runs the Lie Lab's two scenarios for the demo page, with the fisherman `0xa6De325D2e517c31e844be2c951fC0310fd65167` (challenges the node's lie) and the liar `0x128776580CA7DEf3850e6a2ad6D9B771d67d4eC2` (posts the visitor's false challenge), and re-opens the lab after a slash. `/health` says whether a scenario can run |
 | Watcher | `https://interlude-watcher-lab.fly.dev` | Fly app `interlude-watcher-lab`, `interlude-watcher` following the old lab Room. `GET /verdict?app=<app>&partition=<p>` gives its latest verdict |
-| Room demo and explorer | `https://demo.interludelayer.xyz` | Vercel. Live: `/room` names the Paris floor `0xA116…084C`, the build carries the seven salons, `/tap` names Tap's two books, and `/lab` runs the Lie Lab |
+| Room demo and explorer | `https://demo.interludelayer.xyz` | Vercel. Live: `/room` names the Paris floor `0xA116…084C`, the build carries the seven salons, `/exchange` names Interlude Exchange's two books, and `/lab` runs the Lie Lab |
 | Kandle | `https://kandle.live` | Vercel. Live: `GET /api/table` sends each visitor to the nearest of the seven regional tables that answers |
+
+## Source verification
+
+Hub v3 and LieLab are verified on [MonadScan](https://testnet.monadscan.com/address/0x98922c6E5e4Bea62761C71D2401c7ec2c26eC43e#code)
+and on Sourcify (sourcify.dev and MonadVision's instance), each an exact match, metadata hash
+included, so the explorers decode the hub's challenges, proofs, votes and verdicts. No other
+contract is verified.
+
+| | Hub v3 | LieLab |
+|---|---|---|
+| Address | `0x98922c6E5e4Bea62761C71D2401c7ec2c26eC43e` | `0x8969cE704EFC7F22376Efe7EE618641020Af9D13` |
+| Created by | tx `0x841c78c7…2153fee`, block 66269347, sent by the admin `0xB28E…d691` (`DeployRoom.s.sol`) | tx `0x031162e8…35227b3`, block 66711113, sent by the lab validator `0x467e…923B` (`scripts/open-lielab.sh contract`, `DeployLieLab.s.sol`) |
+| Source | `src/InterludeHub.sol:InterludeHub` at `ec48f1b` | `src/examples/LieLab.sol:LieLab` at `679cc44` |
+| Constructor | `admin_` = `0xB28E684815b095aB5Fb324214cfEa63d76F3d691` | `hub_` = hub v3, `stakeFloor` = 20000000000000000 wei (0.02 MON) |
+| Libraries | none linked: all are internal | none linked |
+
+Both use the repo's `foundry.toml`: solc 0.8.28+commit.7893614a, optimizer on, 200 runs,
+evmVersion prague, no via-IR, bytecodeHash ipfs. On chain, each creation input is `forge build`'s
+`bytecode` followed by the ABI-encoded arguments. LieLab's runtime differs from
+`deployedBytecode` only in the ten slots of its immutable `hub`.
+
+To repeat, from `packages/contracts` of a checkout at the commit above, with `lib/forge-std` in
+place and `A` set to `<address> <path>:<name> --chain 10143 --compiler-version 0.8.28+commit.7893614a --num-of-optimizations 200 --evm-version prague`:
+
+    with-keys ETHERSCAN_API_KEY=ETHERSCAN_API_TOKEN -- forge verify-contract $A --verifier etherscan \
+      --verifier-url 'https://api.etherscan.io/v2/api?chainid=10143' --constructor-args <abi-encoded args> --watch
+    forge verify-contract $A --verifier sourcify
+    forge verify-contract $A --verifier sourcify --verifier-url https://sourcify-api-monad.blockvision.org/
+
+`cast abi-encode "constructor(address)" <admin>` and
+`cast abi-encode "constructor(address,uint256)" <hub> 20000000000000000` give the arguments.
 
 ## Retired
 
